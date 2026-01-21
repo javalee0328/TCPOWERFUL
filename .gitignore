@@ -1,0 +1,41 @@
+# Ignore everything
+*
+
+# Un-ignore the .gitignore itself
+!.gitignore
+
+# Un-ignore project root files
+!main.py
+!requirements.txt
+!README.md
+!main.spec
+!installer.nsi
+
+# Un-ignore project directories
+!core/
+!ui/
+
+# Un-ignore everything inside project directories
+!core/**
+!ui/**
+
+# Traditional ignores for project directories
+**/__pycache__/
+**/*.py[cod]
+**/*.so
+ui/temp_snapshots/
+.idea/
+.vscode/
+backups/
+node_modules/
+*.log
+settings.json
+*.lock
+bin/
+ffmpeg.exe
+ffplay.exe
+ffprobe.exe
+*.dll
+dist/
+build/
+*.exe

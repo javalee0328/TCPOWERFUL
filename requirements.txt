@@ -1,0 +1,11 @@
+openpyxl
+pandas
+paramiko
+schedule
+playwright
+pyodbc
+chardet
+pyautogui
+pywin32
+xlsxwriter
+tkcalendar
