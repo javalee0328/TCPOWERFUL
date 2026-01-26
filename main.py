@@ -89,6 +89,26 @@ if __name__ == "__main__":
         main_debug_log("Starting Application Init...")
         app.setApplicationName("ProTranscoder 2026")
         
+        # --- Mandatory Hardware Protection (SafeNet Sentinel) ---
+        from core.security import LicenseManager
+        lm = LicenseManager()
+        allowed, status_msg, ids = lm.check_protection()
+        
+        if not allowed:
+            main_debug_log(f"Access Denied: {status_msg}")
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("授權驗證失敗 (License Error)")
+            msg.setText("未偵測到 SafeNet 加密鎖 (Dongle Not Found)")
+            msg.setInformativeText("請插入 SafeNet Sentinel 加密鎖後重試。\n(Please insert the hardware key and try again.)")
+            msg.setStandardButtons(QMessageBox.Ok)
+            # Styling for dark mode compatibility if needed
+            msg.setStyleSheet("QLabel { color: #000; }") 
+            msg.exec()
+            sys.exit(0)
+            
+        main_debug_log(f"License Verified: {status_msg}")
+        
         main_debug_log("Initializing MainWindow...")
         window = ModernTranscoderUI()
         
