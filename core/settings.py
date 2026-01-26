@@ -74,6 +74,28 @@ class SettingsManager:
         except Exception as e:
              debug_log(f"History update error: {e}")
 
+    def clear_history(self, key):
+        """Clear the history list for a given key."""
+        try:
+            self.settings[key] = []
+            self.save()
+            debug_log(f"Cleared history for {key}")
+        except Exception as e:
+            debug_log(f"Error clearing history {key}: {e}")
+
+    def remove_history_item(self, key, path):
+        """Remove a specific path from history."""
+        try:
+            history = self.settings.get(key, [])
+            norm_path = os.path.normpath(path)
+            if norm_path in history:
+                history.remove(norm_path)
+                self.settings[key] = history
+                self.save()
+                debug_log(f"Removed {path} from {key}")
+        except Exception as e:
+            debug_log(f"Error removing item from {key}: {e}")
+
     def get_history_position(self, file_path):
         if not file_path: return 0
         norm_key = os.path.normpath(file_path)

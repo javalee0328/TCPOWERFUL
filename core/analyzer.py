@@ -27,12 +27,11 @@ class AudioLevelAnalyzer(QThread):
         cmd = [
             "ffmpeg", 
             "-ss", str(self.start_time),
-            "-copyts", 
             "-err_detect", "ignore_err", # Don't stop on decoding glitches
             "-fflags", "+genpts+igndts", # Ensure monotonic timestamps for VU sync
             "-i", self.file_path, 
             "-vn", "-sn", "-dn", "-ignore_unknown",
-            "-probesize", "2500000", "-analyzeduration", "2500000", 
+            "-probesize", "32768", "-analyzeduration", "10000",
             "-af", f"astats=length={self.interval}:metadata=1:reset=1,ametadata=print",
             "-f", "null", "-"
         ]
@@ -51,7 +50,8 @@ class AudioLevelAnalyzer(QThread):
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                startupinfo=startupinfo
+                startupinfo=startupinfo,
+                bufsize=0 # Unbuffered to reduce latency
             )
             
             # Temporary storage for current frame's levels
@@ -75,16 +75,12 @@ class AudioLevelAnalyzer(QThread):
                 # Critical: Use ffmpeg's time for sync
                 # ametadata output can be 'pts_time:0.123' or 'pts_time=0.123'
                 if "pts_time" in line:
-                    try:
-                        # Split by both separators
-                        part = line.split("pts_time")[1]
-                        val_str = part.strip().lstrip("=:").split()[0]
-                        t = float(val_str)
-                        current_time_ms = int(t * 1000)
-                        # print(f"DEBUG: Parsed time {current_time_ms}ms from line: {line}")
-                    except: 
-                        # print(f"DEBUG: Failed parse time: {line}")
-                        pass
+                        # pts_time:0.123 or pts_time=0.123
+                        line_cleaned = line.replace("=", ":")
+                        t_str = line_cleaned.split("pts_time:")[1].split()[0]
+                        t = float(t_str)
+                        # Add self.start_time because we didn't use -copyts (so t is relative to -ss)
+                        current_time_ms = int((t + self.start_time) * 1000)
 
                 m = re_level.search(line)
                 if m:

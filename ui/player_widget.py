@@ -141,13 +141,18 @@ class StereoVUMeter(QWidget): # Kept name for compatibility, but logic is Multi-
                     draw_bar(bar_positions[i], self.levels[i], self.peaks[i])
             
             # Draw SCALES
-            painter.setFont(QFont("Segoe UI", 7))
+            font = QFont("Segoe UI")
+            font.setPixelSize(9) # Use Pixel Size for consistency across DPI
+            painter.setFont(font)
             dbfs_ticks = [0, -10, -20, -30, -40, -60]
             fm = painter.fontMetrics()
             v_off = fm.ascent() // 2 - 1
 
             # Headers (Concentrated at top)
-            painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+            header_font = QFont("Segoe UI")
+            header_font.setPixelSize(10)
+            header_font.setBold(True)
+            painter.setFont(header_font)
             painter.setPen(QColor(200, 200, 200))
             # Center Headers over the scale columns
             painter.drawText(left_ticks_x - 18, top_margin - 6, "VU")
@@ -629,7 +634,7 @@ class VideoPlayerWidget(QWidget):
         self.vu_timer.timeout.connect(self.update_vu)
         self.vu_timer.start(20) # 50fps for smooth segments
         
-        self.vu_offset_ms = 150
+        self.vu_offset_ms = 120 # Reduced for tighter response
 
     def update_floating_time(self):
         if self.slider.isVisible():
@@ -719,26 +724,32 @@ class VideoPlayerWidget(QWidget):
         elif shape == "skip_back":
             painter.setBrush(QColor(color))
             painter.setPen(Qt.NoPen)
-            # Left bar
+            # Left Bar (Thickness 3)
+            # x=2, y=2, w=3, h=s-4
             painter.drawRect(m, m+2, 3, s-4)
-            # Left arrow
+            
+            # Left Triangle
+            # Pointing Left. Tip at x=7 (m+5). Base at m+s-2.
             path = QPainterPath()
-            path.moveTo(m+s-2, m+2)
-            path.lineTo(m+5, m+s/2)
-            path.lineTo(m+s-2, m+s-2)
+            path.moveTo(m+s-2, m+2)        # Top-Right
+            path.lineTo(m+s-2, m+s-2)      # Bottom-Right
+            path.lineTo(m+5, m+s/2)        # Left Tip
             path.closeSubpath()
             painter.drawPath(path)
         
         elif shape == "skip_forward":
             painter.setBrush(QColor(color))
             painter.setPen(Qt.NoPen)
-            # Right bar
-            painter.drawRect(m+s-3, m+2, 3, s-4)
-            # Right arrow
+            # Right Bar (Thickness 3)
+            # Mirror of Left Bar. x = size - m - 3.
+            painter.drawRect(size - m - 3, m+2, 3, s-4)
+            
+            # Right Triangle
+            # Pointing Right. Tip at x = size - m - 5. Base at m+2.
             path = QPainterPath()
-            path.moveTo(m+2, m+2)
-            path.lineTo(m+s-5, m+s/2)
-            path.lineTo(m+2, m+s-2)
+            path.moveTo(m+2, m+2)          # Top-Left
+            path.lineTo(m+2, m+s-2)        # Bottom-Left
+            path.lineTo(size - m - 5, m+s/2) # Right Tip
             path.closeSubpath()
             painter.drawPath(path)
             
@@ -820,6 +831,11 @@ class VideoPlayerWidget(QWidget):
         else:
             target = 0 # Start of file
             
+        # Optimization: Don't seek if already very close (e.g. within 100ms)
+        current = self.media_player.position()
+        if abs(current - target) < 100:
+            return
+
         self.media_player.setPosition(target)
         self.media_player.pause()
         self.restart_analyzer(target)
@@ -835,6 +851,11 @@ class VideoPlayerWidget(QWidget):
         elif self.out_point is not None:
             target = self.out_point
             
+        # Optimization: Don't seek if already very close
+        current = self.media_player.position()
+        if abs(current - target) < 100:
+            return
+
         self.media_player.setPosition(target)
         self.media_player.pause()
         self.restart_analyzer(target)
@@ -948,10 +969,14 @@ class VideoPlayerWidget(QWidget):
                     self.in_point = self.saved_source_in
                 if hasattr(self, 'saved_source_out'):
                     self.out_point = self.saved_source_out
+                
+                # Restore UI Markers
+                self.set_in_out(self.in_point, self.out_point)
             else:
                 # NEW source loaded - clear everything
                 self.in_point = None
                 self.out_point = None
+                self.set_in_out(None, None)
             
             self.original_source = norm_path
         else:
@@ -1039,10 +1064,10 @@ class VideoPlayerWidget(QWidget):
         # Update Buttons Tooltips & Icons to reflect state
         if in_point is not None:
              self.btn_seek_in.setToolTip(f"跳轉至入點 (Go to IN)\n{self.format_time(in_point)}")
-             self.btn_seek_in.setIcon(self.style().standardIcon(QStyle.SP_MediaSkipBackward))
+             self.btn_seek_in.setIcon(self.create_geometric_icon("skip_back", "#E0E0E0", size=24))
         else:
              self.btn_seek_in.setToolTip("回到開頭 (Go to Start)")
-             self.btn_seek_in.setIcon(self.style().standardIcon(QStyle.SP_MediaSkipBackward)) # Same icon, different tip
+             self.btn_seek_in.setIcon(self.create_geometric_icon("skip_back", "#E0E0E0", size=24)) # Same icon, different tip
 
         if out_point is not None:
              self.btn_seek_out.setToolTip(f"跳轉至出點 (Go to OUT)\n{self.format_time(out_point)}")
@@ -1332,21 +1357,23 @@ class VideoPlayerWidget(QWidget):
                 
                 if hasattr(self, 'audio_levels') and self.audio_levels:
                     idx = int(lookup_time / 25)
-                    # Fuzzy lookup: Try idx, then idx-1, then idx+1 to handle minor gaps
+                    # Expanded fuzzy lookup for better resilience
                     levels = self.audio_levels.get(idx)
                     if not levels: levels = self.audio_levels.get(idx - 1)
                     if not levels: levels = self.audio_levels.get(idx + 1)
+                    if not levels: levels = self.audio_levels.get(idx - 2)
+                    if not levels: levels = self.audio_levels.get(idx + 2)
                     
                     if levels:
+                        self.vu.set_color_mode("green" if getattr(self, '_is_playing_result', False) else "blue")
                         self.vu.setRealtime(True)
                         self.vu.setLevels(levels)
                     else:
-                        # Fallback for missing data
+                        # Only reset if we've been missing data for a bit to avoid flickering
                         self.vu.setRealtime(False)
                 else:
-                    # No data yet - show silence
-                    self.vu.setLevels([-100.0, -100.0, -100.0, -100.0])
                     self.vu.setRealtime(False)
+                    self.vu.setLevels([-100.0] * 4)
             else:
                 self.vu.setLevels([-100.0] * 4)
         except Exception:

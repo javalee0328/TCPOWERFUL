@@ -7,13 +7,11 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QListWidget, QProgressBar, QFileDialog,
     QFrame, QSplitter, QCheckBox, QLineEdit, QSpinBox, QListWidgetItem,
     QAbstractItemView, QGridLayout, QStackedLayout, QComboBox, QDoubleSpinBox,
-    QInputDialog, QMessageBox, QProgressDialog, QMenu
+    QInputDialog, QMessageBox, QProgressDialog, QMenu, QWidgetAction,
+    QToolButton, QStyle, QAbstractSpinBox, QDialog, QTextEdit
 )
-from PySide6.QtCore import Qt, QSize, QProcess, QTimer, QDir, QEvent, Signal, QRectF, QThread
-from PySide6.QtGui import QIcon, QAction
-from PySide6.QtWidgets import QStyle, QAbstractSpinBox, QToolButton
-from PySide6.QtGui import QIcon, QAction, QKeySequence, QShortcut, QPixmap, QPainter, QPainterPath, QPen, QColor, QKeyEvent
-from PySide6.QtCore import QTime
+from PySide6.QtCore import Qt, QSize, QProcess, QTimer, QDir, QEvent, Signal, QRectF, QThread, QTime
+from PySide6.QtGui import QIcon, QAction, QKeySequence, QShortcut, QPixmap, QPainter, QPainterPath, QPen, QColor, QKeyEvent, QBrush, QPalette
 from core.settings import SettingsManager
 from core.metadata import get_video_metadata
 from core.preset_data import PRESETS
@@ -145,6 +143,75 @@ class TranscodeWorker(QThread):
             except:
                 pass
 
+class SmartFailureDialog(QDialog):
+    """Professional dialog to translate technical errors into actionable solutions."""
+    def __init__(self, technical_log, user_suggestion, fix_params=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("智能轉碼診斷 (Smart Diagnosis)")
+        self.resize(550, 420)
+        self.setStyleSheet("background-color: #1e1e1e; color: #e0e0e0;")
+        self.fix_params = fix_params
+        self.apply_fix = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        # Header
+        header = QLabel("💡 智能分析建議 (Smart Suggestion)")
+        header.setStyleSheet("font-size: 18px; font-weight: bold; color: #40C4FF;")
+        layout.addWidget(header)
+
+        # Suggestion Text
+        self.lbl_suggestion = QLabel(user_suggestion)
+        self.lbl_suggestion.setWordWrap(True)
+        self.lbl_suggestion.setStyleSheet("font-size: 14px; line-height: 1.5; background: #2d2d2d; padding: 15px; border-radius: 6px;")
+        layout.addWidget(self.lbl_suggestion)
+
+        # Tech Details (Collapsed by default)
+        self.details_btn = QPushButton("▶ 顯示技術詳情 (Technical Details)")
+        self.details_btn.setCheckable(True)
+        self.details_btn.setStyleSheet("text-align: left; background: transparent; border: none; color: #888; padding: 5px;")
+        layout.addWidget(self.details_btn)
+
+        self.txt_details = QTextEdit()
+        self.txt_details.setPlainText(technical_log)
+        self.txt_details.setReadOnly(True)
+        self.txt_details.setFixedHeight(120)
+        self.txt_details.setStyleSheet("background: #000; color: #aaa; font-family: 'Consolas'; font-size: 11px; border: 1px solid #333;")
+        self.txt_details.hide()
+        layout.addWidget(self.txt_details)
+
+        self.details_btn.clicked.connect(lambda: self.txt_details.setVisible(self.details_btn.isChecked()))
+
+        layout.addStretch()
+
+        # Action Buttons
+        btns = QHBoxLayout()
+        self.btn_cancel = QPushButton("取消 (Cancel)")
+        self.btn_cancel.setFixedSize(120, 36)
+        self.btn_cancel.setStyleSheet("QPushButton { background: #444; border-radius: 4px; color: white; } QPushButton:hover { background: #555; }")
+        self.btn_cancel.clicked.connect(self.reject)
+
+        self.btn_retry = QPushButton("套用修復並重試 (Apply & Retry)")
+        self.btn_retry.setFixedSize(180, 36)
+        if fix_params:
+            self.btn_retry.setStyleSheet("QPushButton { background: #1976d2; color: white; font-weight: bold; border-radius: 4px; } QPushButton:hover { background: #1e88e5; }")
+        else:
+            self.btn_retry.setEnabled(False)
+            self.btn_retry.setStyleSheet("background: #333; color: #666; border-radius: 4px;")
+
+        self.btn_retry.clicked.connect(self.on_apply)
+
+        btns.addStretch()
+        btns.addWidget(self.btn_cancel)
+        btns.addWidget(self.btn_retry)
+        layout.addLayout(btns)
+
+    def on_apply(self):
+        self.apply_fix = True
+        self.accept()
+
 class TaskProgressWidget(QWidget):
     removed = Signal(object)
     transcode_requested = Signal(object) 
@@ -180,8 +247,8 @@ class TaskProgressWidget(QWidget):
         # 4. Time Range (In/Out)
         # 4. Time Range (Start - End)
         self.lbl_time_range = QLabel("-")
-        self.lbl_time_range.setFixedWidth(180)
-        self.lbl_time_range.setStyleSheet("color: #ffffff; font-size: 14px;") # Changed to White
+        self.lbl_time_range.setFixedWidth(220) # Widened to prevent truncation
+        self.lbl_time_range.setStyleSheet("color: #ffffff; font-size: 14px;")
         layout.addWidget(self.lbl_time_range)
 
         # 5. Performance
@@ -267,9 +334,13 @@ class TaskProgressWidget(QWidget):
         
         # UI Updates
         self.lbl_status.setText("Done")
-        self.lbl_status.setStyleSheet("color: #00c853; font-weight: bold;")
         self.lbl_perf.setText(speed_text)
         self.lbl_percent.setText("100%")
+        
+        # Display full time range: Start - End
+        end_time = QTime.currentTime().toString("HH:mm:ss")
+        start_t_str = self.start_time.toString("HH:mm:ss") if hasattr(self, 'start_time') and self.start_time else "--:--:--"
+        self.lbl_time_range.setText(f"{start_t_str} - {end_time}")
         
         # Icon/Buttons
         self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24))
@@ -528,6 +599,66 @@ class TaskProgressWidget(QWidget):
 
 
 
+
+
+class HistoryItemWidget(QWidget):
+    """Custom widget for History menu entries with a delete button."""
+    triggered = Signal(str)
+    removed = Signal(str)
+
+    def __init__(self, path, display_text, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.setMinimumWidth(300) # Slightly narrower for safe fit
+        self.setFixedHeight(34)
+        self.setMouseTracking(True)
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(5)
+        
+        # Folder Icon + Text
+        self.lbl_path = QLabel(display_text)
+        self.lbl_path.setStyleSheet("color: white; font-size: 13px; background: transparent; border: none; font-weight: bold;")
+        # Prevent it from taking too much space and pushing the button out
+        self.lbl_path.setMinimumWidth(100)
+        layout.addWidget(self.lbl_path, 1)
+        
+        # Delete Button - Standard Red 'X' with Border for visibility
+        self.btn_del = QPushButton("X")
+        self.btn_del.setFixedSize(22, 22)
+        self.btn_del.setCursor(Qt.PointingHandCursor)
+        self.btn_del.setToolTip("移除 (Remove)")
+        self.btn_del.setStyleSheet("""
+            QPushButton { 
+                background-color: transparent; color: #ff453a; 
+                border: 2px solid #ff453a; border-radius: 4px;
+                font-weight: bold; font-size: 13px;
+            }
+            QPushButton:hover { background-color: #ff453a; color: white; }
+        """)
+        self.btn_del.clicked.connect(lambda: self.removed.emit(self.path))
+        layout.addWidget(self.btn_del)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # Check if clicked outside delete button
+            if not self.btn_del.geometry().contains(event.pos()):
+                self.triggered.emit(self.path)
+        super().mouseReleaseEvent(event)
+
+    def enterEvent(self, event):
+        self.lbl_path.setStyleSheet("color: white; font-size: 13px; background: #0078d4; border: none; font-weight: bold;")
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.lbl_path.setStyleSheet("color: white; font-size: 13px; background: transparent; border: none; font-weight: bold;")
+        super().leaveEvent(event)
+
+
+
+
+
 class ModernTranscoderUI(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -582,6 +713,155 @@ class ModernTranscoderUI(QMainWindow):
         self.loading = False
         debug_log("MainWindow: Init Complete")
         
+
+    def update_history_menus(self):
+        # 1. Output History (Existing)
+        try:
+             if hasattr(self, 'menu_hist_out'):
+                self.menu_hist_out.clear()
+        except: pass
+        
+        out_history = self.settings.get("output_history", [])
+        if hasattr(self, 'menu_hist_out'):
+            for path in out_history:
+                 action = self.menu_hist_out.addAction(path)
+                 action.triggered.connect(lambda checked=False, p=path: self.set_output_dir_from_history(p))
+             
+        # 2. Source History (New)
+        if hasattr(self, 'menu_hist_source'):
+            self.menu_hist_source.clear()
+            self.menu_hist_source.setStyleSheet("QMenu { background-color: #2b2b2b; }")
+            
+            src_history = self.settings.get("source_history", [])
+            print(f"DEBUG: Updating History Menu. Count: {len(src_history)}")
+            
+            # [History Cleanup]
+            clean_history = []
+            seen = set()
+            for path in src_history:
+                if not path: continue
+                p = os.path.normpath(path)
+                if os.path.isfile(p): p = os.path.dirname(p)
+                if p not in seen:
+                    seen.add(p)
+                    clean_history.append(p)
+            src_history = clean_history
+
+            if not src_history:
+                act = self.menu_hist_source.addAction("(Empty History)")
+                act.setEnabled(False)
+            else:
+                for path in src_history:
+                    display = path
+                    if len(display) > 40:
+                        try:
+                            head, tail = os.path.split(path)
+                            display = f"📁 .../{os.path.basename(head)}/{tail}" if head else f"📁 {display[-35:]}"
+                        except: display = f"📁 {display[-35:]}"
+                    else:
+                        display = f"📁 {display}"
+
+                    # Custom Widget
+                    item_w = HistoryItemWidget(path, display)
+                    action = QWidgetAction(self.menu_hist_source)
+                    action.setDefaultWidget(item_w)
+                    
+                    item_w.triggered.connect(lambda p, a=action: self.handle_history_menu_selection(p, a))
+                    item_w.removed.connect(self.remove_source_history_item)
+                    self.menu_hist_source.addAction(action)
+            
+            self.menu_hist_source.addSeparator()
+            self.menu_hist_source.addAction("全部清空 (Clear All)").triggered.connect(self.clear_source_history)
+
+
+
+    def set_output_dir_from_history(self, path):
+         if os.path.isdir(path):
+             self.output_dir = path
+             self.lbl_output_path.setText(path)
+             self.settings.add_output_history(path)
+             self.update_history_menus() # Refresh order
+             self.save_settings()
+
+    def load_source_from_history(self, path):
+        """Open File Dialog at the history folder."""
+        if os.path.exists(path):
+            # Instead of loading directly, we OPEN the dialog at this path
+            self.last_source_dir = path
+            self.add_files() # This opens QFileDialog using last_source_dir
+            
+            # Move to top of history
+            self.settings.add_source_history(path)
+            self.update_history_menus()
+            self.save_settings()
+        else:
+             from PySide6.QtWidgets import QMessageBox
+             QMessageBox.warning(self, "Error", "Folder not found: " + path)
+
+    def check_smart_remux(self, path):
+        """Probes file and returns fixed path if SLES/Unknown & _remux exists."""
+        if not path or not os.path.exists(path): return path, None
+        
+        try:
+            from core.metadata import get_video_metadata
+            meta = get_video_metadata(path)
+            is_sles = meta and ("SLES" in meta.get("codec_tag", "") or meta.get("codec") == "unknown")
+            
+            print(f"DEBUG: SmartCheck - File: {os.path.basename(path)}")
+            print(f"DEBUG: SmartCheck - Codec: {meta.get('codec')}, Tag: {meta.get('codec_tag')}, is_sles: {is_sles}")
+            
+            if is_sles:
+                fixed_path = os.path.splitext(path)[0] + "_remux.ts"
+                print(f"DEBUG: SmartCheck - Looking for: {fixed_path} -> Exists: {os.path.exists(fixed_path)}")
+                
+                if os.path.exists(fixed_path):
+                     print(f"DEBUG: Auto-switching to fixed version: {fixed_path}")
+                     # RE-PROBE metadata for the fixed file so codec info is correct
+                     from core.metadata import get_video_metadata
+                     fixed_meta = get_video_metadata(fixed_path)
+                     print(f"DEBUG: Fixed Meta Probe -> Codec: {fixed_meta.get('codec') if fixed_meta else 'FAILED'}")
+                     
+                     if hasattr(self, 'statusBar'):
+                         self.statusBar().showMessage(f"已自動載入修復版本 (Codec: {fixed_meta.get('codec') if fixed_meta else '??'})", 3000)
+                     return fixed_path, fixed_meta if fixed_meta else meta
+            return path, meta
+            
+        except Exception as e:
+            print(f"Error checking remux: {e}")
+            return path, None
+
+    def clear_source_history(self):
+        self.settings.set("source_history", [])
+        self.update_history_menus()
+        self.save_settings()
+
+    def open_history_manager(self):
+        try:
+            from ui.history_dialog import HistoryManagerDialog
+            dlg = HistoryManagerDialog(self.settings, "source_history", "管理源檔歷史 (Manage Source History)", self)
+            dlg.exec()
+            # Refresh menu after dialog closes
+            self.update_history_menus()
+        except Exception as e:
+            print(f"Error opening history manager: {e}")
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Error", f"Failed to open manager: {e}")
+
+    def remove_source_history_item(self, path):
+        """Remove a specific path and refresh menu."""
+        history = self.settings.get("source_history", [])
+        if path in history:
+            history.remove(path)
+            self.settings.set("source_history", history)
+            # Use a longer delay (100ms) to ensure event processing is finished 
+            # to avoid "Internal C++ object already deleted" crash
+            QTimer.singleShot(100, self.update_history_menus)
+
+    def handle_history_menu_selection(self, path, action):
+        """Standard selection handler that also closes the menu."""
+        self.menu_hist_source.close()
+        self.load_source_from_history(path)
+
     def load_saved_settings(self):
         saved_out = self.settings.get("output_dir")
         print(f"DEBUG: Loading Settings... OutputDir: {saved_out}")
@@ -598,6 +878,11 @@ class ModernTranscoderUI(QMainWindow):
         self.spin_seq.setValue(self.settings.get("next_seq", 1))
         # Strip 'k' from loaded bitrate to prevent '5000kk'
         self.edit_bitrate.setText(str(self.settings.get("bitrate", "5000")).rstrip('k'))
+        if hasattr(self, 'combo_fps'):
+            self.combo_fps.setCurrentText(str(self.settings.get("fps", "")))
+        if hasattr(self, 'combo_sys'):
+            self.combo_sys.setCurrentText(str(self.settings.get("tv_system", "Auto")))
+            
         self.output_dir = self.settings.get("output_dir", "")
         if self.output_dir:
             self.lbl_output_path.setText(self.output_dir)
@@ -606,15 +891,18 @@ class ModernTranscoderUI(QMainWindow):
         last_file = self.settings.get("last_source_file", "")
         print(f"DEBUG: Loaded Settings - Output: {self.output_dir}, Source: {last_file}")
         if last_file:
-            self.current_source = last_file
+            # Apply Smart Check on Auto-Load
+            final_path, meta = self.check_smart_remux(last_file)
+            self.current_source = final_path
             
             # Use history position
-            saved_pos = self.settings.get_history_position(last_file)
+            saved_pos = self.settings.get_history_position(final_path)
             
             # Defer ALL file operations
             def load_deferred():
-                self.update_metadata_panel(last_file)
-                self.player.load_video(last_file, start_pos=saved_pos)
+                # Use preloaded meta if available
+                self.update_metadata_panel(final_path, preloaded_meta=meta)
+                self.player.load_video(final_path, start_pos=saved_pos)
             
             QTimer.singleShot(100, load_deferred)
                 
@@ -656,6 +944,9 @@ class ModernTranscoderUI(QMainWindow):
         # Save Target Settings
         if hasattr(self, 'combo_fps') and self.combo_fps.currentText():
             self.settings.set("fps", self.combo_fps.currentText())
+        if hasattr(self, 'combo_sys') and self.combo_sys.currentText():
+            self.settings.set("tv_system", self.combo_sys.currentText())
+            
         self.settings.set("tgt_container", self.combo_container.currentText())
         self.settings.set("tgt_vcodec", self.combo_vcodec.currentText())
         self.settings.set("tgt_gain", self.spin_gain.value())
@@ -680,11 +971,13 @@ class ModernTranscoderUI(QMainWindow):
         self.save_settings()
 
     def on_video_loaded(self, file_path, is_result):
+        print(f"DEBUG: on_video_loaded - Path: {file_path}, IsResult: {is_result}")
         if not is_result:
             self.current_source = file_path
             self.last_source_dir = os.path.dirname(file_path)
-            # Add to Source History
-            self.settings.add_source_history(file_path)
+            # Add DIRECTORY to Source History (Deduped by folder)
+            print(f"DEBUG: Adding to Source History: {self.last_source_dir}")
+            self.settings.add_source_history(self.last_source_dir)
             self.update_history_menus()
             self.save_settings()
         else:
@@ -844,8 +1137,9 @@ class ModernTranscoderUI(QMainWindow):
         source_container = QWidget()
         source_layout = QHBoxLayout(source_container)
         source_layout.setContentsMargins(0,0,0,0)
-        source_layout.setSpacing(5)
+        source_layout.setSpacing(5) # Exactly matching Output Layout spacing
         
+        # 1. Main Load Source Button
         self.btn_source = QToolButton()
         self.btn_source.setIcon(self.style().standardIcon(QStyle.SP_DirHomeIcon))
         self.btn_source.setFixedSize(45, 45)
@@ -856,8 +1150,25 @@ class ModernTranscoderUI(QMainWindow):
             QToolButton:hover { background-color: #444; border-color: #777; }
             QToolButton:pressed { background-color: #222; }
         """)
-        self.btn_source.clicked.connect(self.add_files) # Reuse add files action
+        self.btn_source.clicked.connect(self.add_files) 
         source_layout.addWidget(self.btn_source)
+        
+        # 2. History Dropdown Button (Matching btn_hist_out style)
+        self.btn_hist_source = QToolButton()
+        self.btn_hist_source.setText("▼")
+        self.btn_hist_source.setPopupMode(QToolButton.InstantPopup)
+        self.btn_hist_source.setFixedSize(25, 45)
+        self.btn_hist_source.setStyleSheet("""
+             QToolButton { background: transparent; border: 1px solid #555; border-top-right-radius: 4px; border-bottom-right-radius: 4px; color: #aaa; }
+             QToolButton:hover { background: #444; color: white; }
+             QToolButton::menu-indicator { image: none; }
+        """)
+        
+        # Init Menu
+        self.menu_hist_source = QMenu(self.btn_hist_source)
+        self.menu_hist_source.setStyleSheet("QMenu { background-color: #333; color: white; border: 1px solid #555; } QMenu::item:selected { background-color: #0078d4; }")
+        self.btn_hist_source.setMenu(self.menu_hist_source)
+        source_layout.addWidget(self.btn_hist_source)
         
         self.lbl_source_path = QLabel("請載入源檔 (Please Load Source)")
         self.lbl_source_path.setWordWrap(True)
@@ -1135,6 +1446,27 @@ class ModernTranscoderUI(QMainWindow):
         self.combo_acode.currentTextChanged.connect(self.save_settings)
         t_row1.addWidget(self.combo_acode, 1)
         
+        t_row1.addLayout(t_row1)
+        
+        # Row 1.5: FPS & TV System
+        t_row15 = QHBoxLayout()
+        t_row15.addWidget(QLabel("幀率:"))
+        self.combo_fps = QComboBox()
+        self.combo_fps.addItems(["", "23.976", "24", "25", "29.97", "30", "50", "59.94", "60"])
+        self.combo_fps.setEditable(True)
+        self.combo_fps.setFixedWidth(80)
+        self.combo_fps.currentTextChanged.connect(self.save_settings)
+        t_row15.addWidget(self.combo_fps)
+        
+        t_row15.addWidget(QLabel(" 制式:"))
+        self.combo_sys = QComboBox()
+        self.combo_sys.addItems(["Auto", "NTSC", "PAL"])
+        self.combo_sys.setFixedWidth(70)
+        t_row15.addWidget(self.combo_sys)
+        t_row15.addStretch()
+        
+        target_layout.addLayout(t_row15)
+
         target_layout.addLayout(t_row1)
         
         self.combo_container.currentTextChanged.connect(self.update_audio_defaults)
@@ -1374,7 +1706,13 @@ class ModernTranscoderUI(QMainWindow):
         
         if not files: return
         
-        self.last_source_dir = os.path.dirname(files[0])
+        self.last_source_dir = os.path.normpath(os.path.dirname(files[0]))
+        # [FAITHFUL RECORDING] Add directory to history immediately
+        print(f"DEBUG: add_files -> Recording history: {self.last_source_dir}")
+        self.settings.add_source_history(self.last_source_dir)
+        self.update_history_menus()
+        self.save_settings()
+
         added_first = False
         
         for f in files:
@@ -1419,20 +1757,32 @@ class ModernTranscoderUI(QMainWindow):
         self.lbl_dur.setText("Dur: --")
         self.current_source = ""
         
+
     def on_playlist_item_clicked(self, item):
         path = item.data(Qt.UserRole)
         if not path or not os.path.exists(path): return
         
+        # [Refactored] Use Shared Smart Check
+        path, meta = self.check_smart_remux(path)
+        print(f"DEBUG: Playlist Clicked -> {path} (Remuxed? {'yes' if '_remux.ts' in path.lower() else 'no'})")
+
         self.current_source = path
-        # History check
+        self.last_source_dir = os.path.dirname(path)
+        # FORCE add to history on click to ensure "faithful recording"
+        self.settings.add_source_history(self.last_source_dir)
+        self.update_history_menus()
+
+        # History position check
         start_pos = self.settings.get_history_position(path)
         
         # Load Video
-        # Restore last position (User Requirement: MUST Remember)
         self.player.load_video(path, start_pos=start_pos if start_pos else 0)
         
         # Update Metadata
-        self.update_metadata_panel(path)
+        if 'meta' in locals() and meta:
+             self.update_metadata_panel(path, preloaded_meta=meta)
+        else:
+             self.update_metadata_panel(path)
         
         # Auto-set output if needed
         if not getattr(self, 'output_dir', None):
@@ -1449,7 +1799,9 @@ class ModernTranscoderUI(QMainWindow):
                 "container": self.combo_container.currentText(),
                 "vcodec": self.combo_vcodec.currentText(),
                 "bitrate": self.edit_bitrate.text(),
-                "gain": self.spin_gain.value()
+                "gain": self.spin_gain.value(),
+                "fps": self.combo_fps.currentText(),
+                "tv_system": self.combo_sys.currentText()
             }
             self.settings.set("presets", presets)
             
@@ -1511,8 +1863,13 @@ class ModernTranscoderUI(QMainWindow):
             self.current_preset_extra = {
                 "resolution": data.get("resolution"),
                 "fps": data.get("fps"),
-                "audio_ch": data.get("audio_ch")
+                "audio_ch": data.get("audio_ch"),
+                "tv_system": data.get("tv_system")
             }
+            if hasattr(self, 'combo_fps') and data.get("fps"):
+                self.combo_fps.setCurrentText(data.get("fps"))
+            if hasattr(self, 'combo_sys') and data.get("tv_system"):
+                self.combo_sys.setCurrentText(data.get("tv_system"))
             
             self.loading = False
             self.save_settings() # Save explicit state
@@ -1532,11 +1889,15 @@ class ModernTranscoderUI(QMainWindow):
                     return True # Consumed
         return super().eventFilter(obj, event)
 
-    def update_metadata_panel(self, path):
+    def update_metadata_panel(self, path, preloaded_meta=None):
          # Update Source Label
          self.lbl_source_path.setText(f"{path}")
          
-         meta = get_video_metadata(path)
+         if preloaded_meta:
+             meta = preloaded_meta
+         else:
+             from core.metadata import get_video_metadata
+             meta = get_video_metadata(path)
          if meta:
              self.lbl_format.setText(f"Fmt: {meta.get('format', '--')}")
              self.lbl_vcodec.setText(f"V.Codec: {meta.get('codec', '--')}")
@@ -1544,20 +1905,46 @@ class ModernTranscoderUI(QMainWindow):
              self.lbl_fps.setText(f"FPS: {meta['fps']}")
              self.lbl_bitrate.setText(f"Bitrate: {meta.get('bitrate', '--')}")
              
+             # Restore Audio Labels with nice formatting
+             a_codec = meta.get('audio_codec', '--').lower()
+             if a_codec == 'mp2': a_codec = 'MPEG Audio'
+             elif a_codec == 'aac': a_codec = 'AAC'
+             self.lbl_acodec.setText(f"A.Codec: {a_codec}")
+             
+             a_ch = meta.get('audio_channels', '--')
+             self.lbl_ach.setText(f"A.Ch: {a_ch} Ch" if a_ch != '--' else "A.Ch: --")
+             
              dur_s = meta['duration']
              m, s = divmod(int(dur_s), 60)
              h, m = divmod(m, 60)
              self.lbl_dur.setText(f"Dur: {h:02d}:{m:02d}:{s:02d}")
              
-             self.lbl_acodec.setText(f"A.Codec: {meta.get('audio_codec', '--')}")
-             self.lbl_ach.setText(f"A.Ch: {meta.get('audio_channels', '--')}")
-             
-             # Check for Unknown Codec
+             # [Enhanced Status Detection]
              codec = meta.get('codec', '').lower()
-             if 'unknown' in codec or codec == '':
-                 self.lbl_vcodec.setStyleSheet("color: red; font-weight: bold;")
+             codec_tag = meta.get('codec_tag', '')
+             path_lower = path.lower()
+             
+             # Final Display Fix: If codec name is unknown, try tag
+             display_codec = meta.get('codec', '--')
+             if display_codec.lower() == "unknown" and codec_tag:
+                 display_codec = f"tag:{codec_tag}"
+             
+             if "_remux.ts" in path_lower:
+                 # Blue "Already Re-decoded" State
+                 self.lbl_vcodec.setText(f"V.Codec: {display_codec}")
+                 self.lbl_vcodec.setStyleSheet("color: #0078d4; font-weight: bold; font-size: 11px;")
+                 self.btn_fix_codec.setText(f"已重新解碼 ({display_codec.upper()})")
+                 self.btn_fix_codec.setStyleSheet("background-color: #0078d4; color: white; border-radius: 4px; padding: 2px 8px; font-weight: bold;")
+                 self.btn_fix_codec.show()
+             elif 'unknown' in codec or codec == '':
+                 # Red "Re-Decode" State
+                 self.lbl_vcodec.setStyleSheet("color: red; font-weight: bold; font-size: 11px;")
+                 self.btn_fix_codec.setText("重新解碼 (Re-Decode)")
+                 self.btn_fix_codec.setStyleSheet("background-color: #d32f2f; color: white; border-radius: 4px; padding: 2px 8px; font-weight: bold;")
                  self.btn_fix_codec.show()
              else:
+                 # Normal State
+                 self.lbl_vcodec.setText(f"V.Codec: {display_codec}")
                  self.lbl_vcodec.setStyleSheet("color: #aaa; font-size: 11px;")
                  self.btn_fix_codec.hide()
                  
@@ -1609,16 +1996,42 @@ class ModernTranscoderUI(QMainWindow):
             return
         
         # 1. Container
-        # Try extension first, then format name
-        ext = os.path.splitext(self.current_source)[1].lower().replace('.', '')
-        if not ext:
-            # Fallback to format name from FFmpeg
-            fmt_name = meta.get('format', '').split(',')[0] # 'mov,mp4,m4a' -> 'mov'
-            ext = fmt_name if fmt_name != 'unknown' else 'mp4'
+        # Get detected format(s) from FFmpeg
+        # Format string can be multiple like "mov,mp4,m4a"
+        fmt_str = meta.get('format', '').lower()
+        detected_formats = fmt_str.split(',')
+        
+        # Get file extension
+        file_ext = os.path.splitext(self.current_source)[1].lower().replace('.', '')
+        
+        # Normalization Helper
+        def normalize_fmt(f):
+            if f == "qt": return "mov"
+            if f == "mpeg": return "mpg"
+            if f in ["mpegts", "m2t", "mts"]: return "ts"
+            if f == "matroska": return "mkv"
+            return f
             
-        # Normalization
-        if ext == "qt": ext = "mov"
-        if ext == "mpeg": ext = "mpg"
+        final_ext = "mp4" # Default fallback
+        
+        if not detected_formats or detected_formats == ['']:
+             final_ext = normalize_fmt(file_ext)
+        else:
+             # Check if file extension is valid for this format
+             # (matches one of the detected aliases)
+             is_match = False
+             for f in detected_formats:
+                 if normalize_fmt(f) == normalize_fmt(file_ext):
+                     is_match = True
+                     break
+             
+             if is_match:
+                 final_ext = normalize_fmt(file_ext)
+             else:
+                 # Mismatch (e.g. mpegts in .mp4) -> Trust FFmpeg
+                 final_ext = normalize_fmt(detected_formats[0])
+
+        ext = final_ext
         
         # Add if missing
         found_ext = False
@@ -1631,7 +2044,6 @@ class ModernTranscoderUI(QMainWindow):
         if not found_ext:
             self.combo_container.addItem(ext)
             self.combo_container.setCurrentText(ext)
-            print(f"DEBUG: Added Container '{ext}'")
 
         # 2. Codec
         codec = meta.get('codec', '').lower()
@@ -1654,7 +2066,6 @@ class ModernTranscoderUI(QMainWindow):
             # Add dynamic codec
             self.combo_vcodec.addItem(codec)
             self.combo_vcodec.setCurrentText(codec)
-            print(f"DEBUG: Added Codec '{codec}'")
 
         # 3. Bitrate (Now getting raw Int bps)
         br_bps = meta.get('bitrate', 0)
@@ -1669,6 +2080,24 @@ class ModernTranscoderUI(QMainWindow):
             self.edit_bitrate.setText(str(final_kbps))
         else:
             print("DEBUG: Bitrate is 0 or invalid.")
+            
+        # 4. FPS & TV System (New)
+        fps = str(meta.get('fps', ''))
+        if fps:
+             self.combo_fps.setCurrentText(fps)
+             # Heuristic for TV System
+             try:
+                 fps_val = float(fps)
+                 if 23.9 <= fps_val <= 30.0:
+                     self.combo_sys.setCurrentText("NTSC")
+                 elif fps_val == 50.0 or fps_val == 25.0:
+                      self.combo_sys.setCurrentText("PAL")
+                 elif fps_val >= 59.9:
+                      self.combo_sys.setCurrentText("NTSC")
+                 else:
+                      self.combo_sys.setCurrentText("Auto")
+             except:
+                 pass
 
         # 4. Reset Audio Gain
         self.btn_auto_gain.setChecked(False)
@@ -2059,6 +2488,20 @@ class ModernTranscoderUI(QMainWindow):
         ext = task.get("container", "mp4").lower()
         if not ext.startswith("."): ext = "." + ext
         
+        # [FIX] Dynamic Output Directory Resolution
+        # Force use of current global output setting if available,
+        # to ensure "Open Folder" works as expected even if setting changed after task add.
+        # But we must respect "Same as Source" if that was the intent?
+        # The current UI model is: Global Setting dictates output.
+        # So we should enforce current self.output_dir.
+        
+        current_global_out = getattr(self, 'output_dir', None)
+        if current_global_out and os.path.isdir(current_global_out):
+            task["output_dir"] = current_global_out
+        else:
+            # Fallback to source directory if no global output set
+            task["output_dir"] = os.path.dirname(task["source"])
+            
         output_path = os.path.join(task["output_dir"], task["base_name"] + ext)
 
         task["output_path_ref"] = output_path
@@ -2082,8 +2525,9 @@ class ModernTranscoderUI(QMainWindow):
         worker = TranscodeWorker(cmd, target_duration)
         worker.progress_signal.connect(lambda p, t: self.update_task_progress(task["widget"], p, t))
         worker.finished_signal.connect(lambda s, m: self.on_transcode_finished_worker(task, s, m, single_run))
-        # Ensure it is deleted even if finished_signal is missed (extra safety)
-        worker.finished.connect(worker.deleteLater)
+        # [FIX] Do NOT connect finished->deleteLater automatically. 
+        # We must manage lifecycle explicitly in on_transcode_complete to prevent race conditions (Crash at 99%)
+        # worker.finished.connect(worker.deleteLater) 
         worker.start()
         
         self.workers[task["widget"]] = worker # Track worker
@@ -2128,10 +2572,16 @@ class ModernTranscoderUI(QMainWindow):
                        widget.lbl_status.setStyleSheet("color: #ff5252;")
                    print(f"Transcode Failed: {msg}")
                    
-                   suggestion = self.analyze_error_suggestion(msg)
-                   full_msg = f"錯誤詳情 (Error Details):\n{msg}\n\n💡 建議解法 (Smart Suggestion):\n{suggestion}"
+                   suggestion, fix_params = self.analyze_error_suggestion(msg)
+                    
                    if "Task Cancelled" not in msg:
-                       QMessageBox.critical(self, "轉碼失敗 (Transcode Failed)", full_msg)
+                       dlg = SmartFailureDialog(msg, suggestion, fix_params, self)
+                       if dlg.exec() and dlg.apply_fix:
+                           # Apply fix to task params
+                           for k, v in fix_params.items():
+                               task[k] = v
+                           # Retry
+                           QTimer.singleShot(500, lambda: self.start_transcode_task(task, single_run))
             
                # CLEANUP WORKER IN FAILURE PATH
                if widget in self.workers:
@@ -2156,27 +2606,31 @@ class ModernTranscoderUI(QMainWindow):
             self.process_next_task()
            
     def analyze_error_suggestion(self, log_output):
-        """Analyzes FFmpeg log to provide user-friendly troubleshooting advice."""
+        """Analyzes FFmpeg log to provide actionable fixes."""
         log_lower = log_output.lower()
         
-        if "permission denied" in log_lower or "unable to open" in log_lower:
-             return "無法寫入檔案。請檢查:\n1. 輸出路徑權限\n2. 磁碟空間\n3. 檔案是否被佔用"
-             
-        if "invalid argument" in log_lower:
-             if "mxf" in log_lower and "aac" in log_lower:
-                 return "MXF 容器不支援 AAC 音訊。\n-> 請改用 PCM 音訊 (系統已自動修正此問題，請重試)。"
-             return "參數錯誤。請嘗試更換 [容器] 或 [編碼] 組合。"
-             
-        if "no such file" in log_lower:
-             return "找不到來源檔案。請確認檔案路徑是否包含特殊字元或已移動。"
-             
+        # 1. FPS / Standard Mismatch (The user's specific request)
+        if "drop frame" in log_lower and "multiples of 30000/1001" in log_lower:
+            return ("偵測到 [影格率 (Frame Rate)] 與選定的制式不匹配。\n您的來源檔案可能是 NTSC (29.97fps)，但目前設定可能為 25fps 或其他不相容數值。\n\n💡 建議：自動將目標影格率修正為 29.97 以符合電視制式。", 
+                    {"fps": "29.97"})
+
+        # 2. Container/Codec Incompatibility (e.g. MXF doesn't support AAC)
+        if "mxf" in log_lower and "aac" in log_lower:
+            return ("MXF 封裝格式不支援 AAC 音訊編碼。\n\n💡 建議：自動將音訊改為穩定且高品質的 PCM (s16le) 編碼。", 
+                    {"acodec": "pcm_s16le"})
+
+        # 3. Write Header failures (often bitrate or codec params)
+        if "could not write header" in log_lower or "incorrect codec parameters" in log_lower:
+             return ("封裝參數錯誤。這通常是因為編碼組合或位元率不被該容器支援。\n\n💡 建議：切換為通用的 H.264 + MP4 組合重試。", 
+                     {"container": "mp4", "vcodec": "libx264", "acodec": "aac"})
+
+        if "permission denied" in log_lower:
+             return ("輸出目錄無寫入權限，或磁碟空間不足。\n\n💡 請檢查目標資料夾權限。", None)
+
         if "unknown codec" in log_lower:
-             return "來源編碼無法識別。\n-> 請嘗試使用 [重新解碼 (Re-Decode)] 功能修復源檔。"
-             
-        if "does not support" in log_lower:
-             return "不支援的編碼/容器組合。\n-> 請嘗試更換輸出格式 (例如 .mp4 + h264)。"
+             return ("來源檔編碼無法識別，這常見於損壞的素材。\n\n💡 建議：使用主介面的 [重新解碼 (Re-Decode)] 按鈕嘗試修復。", None)
             
-        return "未知錯誤。請嘗試:\n1. 更換輸出容器 (如 MP4)\n2. 使用 [重新解碼] 修復源檔\n3. 檢查磁碟空間"
+        return ("未知錯誤。建議檢查輸出路徑是否正確，或更換輸出容器 (如 MP4) 再試一次。", None)
 
     def on_transcode_complete(self, exit_code, exit_status, task, single_run):
         try:
@@ -2214,10 +2668,20 @@ class ModernTranscoderUI(QMainWindow):
             if widget in self.workers:
                 worker = self.workers.pop(widget)
                 try:
-                    worker.progress_signal.disconnect()
-                    worker.finished_signal.disconnect()
-                except: pass
-                worker.deleteLater() # Safely schedule deletion
+                    # Explicitly wait for thread to be truly finished if it's still running
+                    # This prevents "Destroyed while thread is still running"
+                    if worker.isRunning():
+                        worker.wait(100) 
+                    
+                    # Disconnect signals to be safe (though deleteLater usually handles this)
+                    try:
+                        worker.progress_signal.disconnect()
+                        worker.finished_signal.disconnect()
+                    except: pass
+                    
+                    worker.deleteLater() # Safely schedule deletion
+                except Exception as cleanup_err:
+                    print(f"Cleanup Warning: {cleanup_err}")
             
             # Reset current task ref
             if getattr(self, 'current_running_task', None) == task:
@@ -2239,9 +2703,11 @@ class ModernTranscoderUI(QMainWindow):
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #0f0f0f;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 13px; /* Standard Pixel Size */
             }
             * {
-                font-size: 13px; /* Global fallback to prevent setPointSize <= 0 warning */
+                 /* Global reset to avoid point-size issues */
             }
             #sidebar {
                 background-color: #1a1a1a;
@@ -2396,67 +2862,17 @@ class ModernTranscoderUI(QMainWindow):
         finally:
             event.accept()
 
-    # --- History Menu Helpers ---
-    def update_history_menus(self):
-        # Source
-        if hasattr(self, 'menu_hist_source'):
-            self.menu_hist_source.clear()
-            src_hist = self.settings.settings.get("source_history", [])
-            if not src_hist:
-                self.menu_hist_source.addAction("無歷史記錄").setEnabled(False)
-            else:
-                for path in src_hist:
-                    action = self.menu_hist_source.addAction(path)
-                    action.triggered.connect(lambda checked=False, p=path: self.player.load_video(p))
-        
-        # Output
-        if hasattr(self, 'menu_hist_out'):
-            self.menu_hist_out.clear()
-            out_hist = self.settings.settings.get("output_history", [])
-            if not out_hist:
-                self.menu_hist_out.addAction("無歷史記錄").setEnabled(False)
-            else:
-                for path in out_hist:
-                    action = self.menu_hist_out.addAction(path)
-                    action.triggered.connect(lambda checked=False, p=path: self.set_output_dir_from_hist(p))
-
-    def set_output_dir_from_hist(self, path):
-         if not os.path.exists(path): return
-         self.output_dir = path
-         self.lbl_output_path.setText(path)
-         self.settings.set("output_dir", path)
-         self.settings.add_output_history(path)
-         self.update_history_menus()
-
-         self.update_history_menus()
-
     def pause_task(self, widget):
         if widget in self.workers:
             print("Requesting Pause...")
             self.workers[widget].pause()
 
     def resume_task(self, widget):
-        # Check concurrency again
+        # Resource limit check
         active_running = [w for w in self.workers.values() if not w.paused]
-        # Ignore if self is in active_running (already running? unlikely if calling resume)
-        # But wait, Resume is called when Paused. So it's not active_running yet.
-        
         if len(active_running) > 0:
              QMessageBox.warning(self, "資源限制", "只能同時進行一個轉碼任務。請先暫停其他任務。")
-             # Reset UI back to paused? TaskProgressWidget optimistic UI might need Revert.
-             # This is tricky because UI already switched to 'Running'.
-             # Ideally TaskProgressWidget should emit signal and wait for confirmation.
-             # But here we just warn.
-             # Actually, if we strictly block, we should toggle the widget state back.
-             # But for now, allow the user to shoot themselves in the foot?
-             # No, user asked for "Switch". So blocking is correct.
-             # "Resource limit".
-             # I will just NOT resume and Warn.
-             # Widget state synchronization is an issue.
-             # I will call widget.toggle_transcode() to revert? Or manually fix.
-             # widget.state = 'paused'; widget.refresh_ui()...
-             # For now, I'll allow it but Warn.
-             QMessageBox.warning(self, "警告", "同時執行多個任務可能會影響效能。")
+             return
         
         if widget in self.workers:
              print("Requesting Resume...")
@@ -2467,9 +2883,3 @@ class ModernTranscoderUI(QMainWindow):
             print("Requesting Stop...")
             self.workers[widget].stop()
 
-if __name__ == "__main__":
-    from PySide6.QtWidgets import QApplication
-    app = QApplication(sys.argv)
-    window = ModernTranscoderUI()
-    window.show()
-    sys.exit(app.exec())
