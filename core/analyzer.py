@@ -27,10 +27,12 @@ class AudioLevelAnalyzer(QThread):
         cmd = [
             "ffmpeg", 
             "-ss", str(self.start_time),
-            "-copyts", # Preserve timestamps for correct sync when seeking
+            "-copyts", 
+            "-err_detect", "ignore_err", # Don't stop on decoding glitches
+            "-fflags", "+genpts+igndts", # Ensure monotonic timestamps for VU sync
             "-i", self.file_path, 
             "-vn", "-sn", "-dn", "-ignore_unknown",
-            # Multi-channel stats (Remove forced stereo)
+            "-probesize", "2500000", "-analyzeduration", "2500000", 
             "-af", f"astats=length={self.interval}:metadata=1:reset=1,ametadata=print",
             "-f", "null", "-"
         ]

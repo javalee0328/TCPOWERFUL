@@ -255,12 +255,17 @@ class ThumbnailWorker(QThread):
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             
             self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, startupinfo=startupinfo)
-            image_data, _ = self.process.communicate()
-            
-            if image_data:
-                pixmap = QPixmap()
-                if pixmap.loadFromData(image_data):
-                    self.result_ready.emit(pixmap)
+            try:
+                # Add Timeout to prevent freeze on corrupt files
+                image_data, _ = self.process.communicate(timeout=1.5) 
+                
+                if image_data:
+                    pixmap = QPixmap()
+                    if pixmap.loadFromData(image_data):
+                        self.result_ready.emit(pixmap)
+            except subprocess.TimeoutExpired:
+                print("Thumbnail gen timed out - killing")
+                self.process.kill()
         except Exception as e:
             print(f"Thumbnail error: {e}")
 
@@ -273,13 +278,14 @@ class FloatingTimeLabel(QLabel):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("""
             QLabel {
-                color: white; 
-                background-color: rgba(0, 0, 0, 200); 
+                color: #ffffff !important; 
+                background-color: rgba(0, 0, 0, 240); 
                 border-radius: 4px; 
-                padding: 4px 8px; 
+                padding: 5px 10px; 
                 font-family: 'Consolas', monospace;
                 font-weight: bold;
-                border: 1px solid #555;
+                font-size: 13px;
+                border: 1px solid #ffffff; 
             }
         """)
         self.adjustSize()
@@ -456,7 +462,7 @@ class VideoPlayerWidget(QWidget):
             }
             QLabel {
                 background-color: transparent;
-                color: #ddd;
+                color: #ffffff;
                 font-family: 'Consolas', monospace;
                 font-weight: bold;
                 font-size: 13px;
@@ -493,7 +499,7 @@ class VideoPlayerWidget(QWidget):
         self.btn_seek_in = QToolButton()
         self.btn_seek_in.setIcon(self.create_geometric_icon("skip_back", "#E0E0E0", size=24))
         self.btn_seek_in.setIconSize(QSize(18, 18))
-        self.btn_seek_in.setToolTip("跳轉至入點 (Go to IN)")
+        self.btn_seek_in.setToolTip("回到開頭 (Go to Start)")
         self.btn_seek_in.setFixedSize(26, 26)
         self.btn_seek_in.setStyleSheet(btn_style)
         self.btn_seek_in.clicked.connect(self.seek_to_in)
@@ -502,7 +508,7 @@ class VideoPlayerWidget(QWidget):
         self.btn_seek_out = QToolButton()
         self.btn_seek_out.setIcon(self.create_geometric_icon("skip_forward", "#E0E0E0", size=24))
         self.btn_seek_out.setIconSize(QSize(18, 18))
-        self.btn_seek_out.setToolTip("跳轉至出點 (Go to OUT)")
+        self.btn_seek_out.setToolTip("跳至結尾 (Go to End)")
         self.btn_seek_out.setFixedSize(26, 26)
         self.btn_seek_out.setStyleSheet(btn_style)
         self.btn_seek_out.clicked.connect(self.seek_to_out)
@@ -589,7 +595,7 @@ class VideoPlayerWidget(QWidget):
         data_layout = QHBoxLayout()
         data_layout.setContentsMargins(5, 0, 5, 0)
         
-        base_style = "color: #777; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 12px; border: 1px solid #333;"
+        base_style = "color: #ffffff; font-weight: bold; padding: 4px 8px; border-radius: 4px; font-size: 12px; border: 1px solid #333;"
         
         self.lbl_in = QLabel("IN: --")
         self.lbl_in.setStyleSheet(base_style)
@@ -816,6 +822,7 @@ class VideoPlayerWidget(QWidget):
             
         self.media_player.setPosition(target)
         self.media_player.pause()
+        self.restart_analyzer(target)
         self.update_vu(force=True)
             
     def seek_to_out(self):
@@ -830,6 +837,7 @@ class VideoPlayerWidget(QWidget):
             
         self.media_player.setPosition(target)
         self.media_player.pause()
+        self.restart_analyzer(target)
         self.update_vu(force=True)
 
     def update_trim_labels(self):
@@ -856,6 +864,14 @@ class VideoPlayerWidget(QWidget):
         
         self.lbl_out.setText(f"OUT: {out_txt}")
         set_style(self.lbl_out, self.out_point is not None)
+        
+        # [NEW] Force Slider Marker Update
+        # Use slider maximum if duration() is not yet available (for responsiveness)
+        disp_dur = self.media_player.duration()
+        if disp_dur <= 0: disp_dur = self.slider.maximum()
+        
+        if disp_dur > 0:
+            self.slider.set_markers(self.in_point, self.out_point, disp_dur)
         
         self.lbl_dur.setText(f"DUR: {dur_txt}")
         set_style(self.lbl_dur, dur > 0)
@@ -925,21 +941,39 @@ class VideoPlayerWidget(QWidget):
             if start_pos >= 0:
                 self.source_position = start_pos
             target_pos = self.source_position
+            
+            # Restore markers if returning to the same original source
+            if self.original_source and self._paths_match(norm_path, self.original_source):
+                if hasattr(self, 'saved_source_in'):
+                    self.in_point = self.saved_source_in
+                if hasattr(self, 'saved_source_out'):
+                    self.out_point = self.saved_source_out
+            else:
+                # NEW source loaded - clear everything
+                self.in_point = None
+                self.out_point = None
+            
             self.original_source = norm_path
         else:
+            # Switching TO result - save current source markers first
+            if not getattr(self, '_is_playing_result', False):
+                self.saved_source_in = self.in_point
+                self.saved_source_out = self.out_point
             target_pos = 0 
 
         self.current_file = norm_path
+        self.pending_seek_pos = target_pos
         self._is_playing_result = is_result # Track for EndOfMedia behavior
         
-        # Orphan existing workers
-        if hasattr(self, 'fps_worker') and self.fps_worker is not None:
-             self._safe_stop_thread(self.fps_worker)
-             self.fps_worker = None
+        # Orphan and safely stop existing workers
+        self._safe_stop_thread(getattr(self, 'fps_worker', None))
+        self.fps_worker = None
 
-        if hasattr(self, 'analyzer') and self.analyzer is not None:
-             self._safe_stop_thread(self.analyzer)
-             self.analyzer = None
+        self._safe_stop_thread(getattr(self, 'analyzer', None))
+        self.analyzer = None
+
+        self._safe_stop_thread(getattr(self, 'thumb_worker', None))
+        self.thumb_worker = None
         
         # Ensure pool doesn't grow infinitely (Force kill old zombies if too many)
         if len(self._thread_pool) > 10:
@@ -969,7 +1003,7 @@ class VideoPlayerWidget(QWidget):
         
         if is_result:
             self.last_result_file = norm_path
-            self.pending_seek_pos = 0
+            # pending_seek_pos already set above
             if start_pos >= 0: self.pending_seek_pos = start_pos
             # Reset Trim Markers when viewing result (full file)
             self.set_in_out(None, None)
@@ -980,12 +1014,6 @@ class VideoPlayerWidget(QWidget):
             # [NEW] Set VU to Green
             self.vu.set_color_mode("green")
         else:
-            if start_pos >= 0:
-                self.pending_seek_pos = start_pos
-                self.source_position = start_pos
-            else:
-                self.pending_seek_pos = 0
-            
             # Update UI for Source View
             self.btn_seek_in.setToolTip("跳轉至入點 (Go to IN)")
             self.btn_seek_out.setToolTip("跳轉至出點 (Go to OUT)")
@@ -1013,13 +1041,13 @@ class VideoPlayerWidget(QWidget):
              self.btn_seek_in.setToolTip(f"跳轉至入點 (Go to IN)\n{self.format_time(in_point)}")
              self.btn_seek_in.setIcon(self.style().standardIcon(QStyle.SP_MediaSkipBackward))
         else:
-             self.btn_seek_in.setToolTip("回到片頭 (Go to Start)")
+             self.btn_seek_in.setToolTip("回到開頭 (Go to Start)")
              self.btn_seek_in.setIcon(self.style().standardIcon(QStyle.SP_MediaSkipBackward)) # Same icon, different tip
 
         if out_point is not None:
              self.btn_seek_out.setToolTip(f"跳轉至出點 (Go to OUT)\n{self.format_time(out_point)}")
         else:
-             self.btn_seek_out.setToolTip("跳至片尾 (Go to End)")
+             self.btn_seek_out.setToolTip("跳至結尾 (Go to End)")
             
         # Ensure we are in paused state to show exact frame
         self.media_player.pause()
@@ -1044,7 +1072,6 @@ class VideoPlayerWidget(QWidget):
         if status == QMediaPlayer.BufferedMedia or status == QMediaPlayer.LoadedMedia:
             if hasattr(self, 'pending_seek_pos') and self.pending_seek_pos >= 0:
                 QTimer.singleShot(150, lambda: self._do_seek(self.pending_seek_pos))
-                QTimer.singleShot(150, lambda: self._do_seek(self.pending_seek_pos))
                 self.pending_seek_pos = -1 # Reset
                 
         elif status == QMediaPlayer.EndOfMedia:
@@ -1057,39 +1084,30 @@ class VideoPlayerWidget(QWidget):
 
                 
     def _do_seek(self, pos):
+        # 1. Immediate UI setPosition (Priority)
         self.media_player.setPosition(pos)
-        # Ensure we STAY PAUSED unless user initiates play (except this is initial load)
-        # However, _do_seek acts for initial load. We should NOT play.
-        # Check if we were already playing? 
-        # If this logic is only for initial load, then we allow Pause.
-        # But thumbnails need frames. Does FFmpeg backend render frame when paused? Yes usually.
         self.media_player.pause()
-            
-        # Trigger Thumbnail extraction
-        self.preview_overlay.clear()
-        self.preview_overlay.show()
-        
+        self.setFocus()
+
+        # 2. Optimized Worker Restarts
+        # Prevent redundant thumbnail/analyzer restarts if seeking very small amounts (jitter)
+        last_seek = getattr(self, '_last_seek_pos', -1)
+        if abs(pos - last_seek) < 100: # Threshold 100ms
+             return
+        self._last_seek_pos = pos
+
+        # Trigger Thumbnail extraction (Only if not already extracting for this pos)
         if hasattr(self, 'thumb_worker') and self.thumb_worker:
             self._safe_stop_thread(self.thumb_worker)
-            self.thumb_worker = None
             
         self.thumb_worker = ThumbnailWorker(self.current_file, pos)
         self.thumb_worker.result_ready.connect(self.on_thumbnail_ready)
         self.thumb_worker.start()
         
-        # Reset Audio Analyzer from new position for accurate VU Sync
+        # Audio Analyzer restart
         if hasattr(self, 'analyzer') and self.analyzer:
              self._safe_stop_thread(self.analyzer)
              
-        # Restart analyzer near seek point (give it a small head start/buffer?)
-        # seek_sec = max(0, pos / 1000.0) 
-        # Actually analyzer uses "start_time".
-        # We need to re-init it.
-        # Note: Analyzer emits index relative to start_time? 
-        # Code check: current_idx = int(self.start_time / self.interval)
-        # So yes, it respects verifying absolute timestamp.
-        
-        from core.analyzer import AudioLevelAnalyzer
         seek_sec = pos / 1000.0
         self.analyzer = AudioLevelAnalyzer(self.current_file, interval=0.025, start_time=seek_sec)
         self.analyzer.level_found.connect(self.on_level_found)
@@ -1209,31 +1227,47 @@ class VideoPlayerWidget(QWidget):
         return getattr(self, 'vu_offset_ms', 150)
 
     def _safe_stop_thread(self, t):
-        """Standardized safe thread stopping mechanism (Zombie Pool)"""
+        """Standardized safe thread stopping mechanism to prevent DestroyedWhileRunning."""
         if not t: return
-        try: t.blockSignals(True)
+        try:
+            # Block and disconnect to prevent callbacks to dying widget
+            t.blockSignals(True)
+            try: t.result_ready.disconnect()
+            except: pass
+            try: t.levels_signal.disconnect()
+            except: pass
+            
+            if hasattr(t, 'stop'):
+                t.stop() 
+            t.quit()
         except: pass
-        t.stop() # Stops ffmpeg/subprocess
         
-        # Add to pool to keep python reference alive
+        # Keep python reference alive until physically finished
         if not hasattr(self, '_thread_pool'): self._thread_pool = []
         self._thread_pool.append(t)
         
-        # Clean pool
+        # Clean finished threads and schedule deletion
         for z in self._thread_pool[:]:
             if z.isFinished() or not z.isRunning():
                 self._thread_pool.remove(z)
                 z.deleteLater()
 
     def shutdown(self):
-        if hasattr(self, 'analyzer') and self.analyzer:
-             self._safe_stop_thread(self.analyzer)
+        """Force cleanup of all resources and threads."""
+        self.vu_timer.stop()
+        self.media_player.stop()
         
-        if hasattr(self, 'fps_worker') and self.fps_worker:
-             self._safe_stop_thread(self.fps_worker)
+        # Stop all tracked workers
+        self._safe_stop_thread(getattr(self, 'fps_worker', None))
+        self._safe_stop_thread(getattr(self, 'analyzer', None))
+        self._safe_stop_thread(getattr(self, 'thumb_worker', None))
         
-        if hasattr(self, 'thumb_worker') and self.thumb_worker:
-             self._safe_stop_thread(self.thumb_worker)
+        # Final cleanup of the reference pool
+        if hasattr(self, '_thread_pool'):
+            for t in self._thread_pool:
+                t.wait(50) # Tiny wait for OS process release
+                t.deleteLater()
+            self._thread_pool.clear()
 
     def set_in_point(self):
         self.in_point = self.media_player.position()
@@ -1283,6 +1317,9 @@ class VideoPlayerWidget(QWidget):
     def update_duration(self, duration):
         self.slider.setRange(0, duration)
         self.lbl_total_time.setText(self.format_time(duration))
+        # [NEW] Refresh Markers if points were set before duration was known
+        if duration > 0:
+            self.slider.set_markers(self.in_point, self.out_point, duration)
         
     def _on_media_ready(self, status):
         pass
@@ -1295,8 +1332,10 @@ class VideoPlayerWidget(QWidget):
                 
                 if hasattr(self, 'audio_levels') and self.audio_levels:
                     idx = int(lookup_time / 25)
-                    # Use .get() for dict access
+                    # Fuzzy lookup: Try idx, then idx-1, then idx+1 to handle minor gaps
                     levels = self.audio_levels.get(idx)
+                    if not levels: levels = self.audio_levels.get(idx - 1)
+                    if not levels: levels = self.audio_levels.get(idx + 1)
                     
                     if levels:
                         self.vu.setRealtime(True)
@@ -1307,7 +1346,7 @@ class VideoPlayerWidget(QWidget):
                 else:
                     # No data yet - show silence
                     self.vu.setLevels([-100.0, -100.0, -100.0, -100.0])
-                    self.vu.setRealtime(False) # Corrected syntax
+                    self.vu.setRealtime(False)
             else:
                 self.vu.setLevels([-100.0] * 4)
         except Exception:

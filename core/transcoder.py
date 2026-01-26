@@ -111,6 +111,10 @@ class Transcoder:
             
         cmd += ["-c:a", acodec]
         
+        if is_mxf:
+            # MXF requires 48kHz audio in almost all profiles. Force it.
+            cmd += ["-ar", "48000"]
+        
         # Only apply bitrate for compressed formats (aac, mp3), NOT pcm
         if "pcm" not in acodec:
              cmd += ["-b:a", "128k"]

@@ -19,6 +19,7 @@ from core.metadata import get_video_metadata
 from core.preset_data import PRESETS
 import subprocess
 import logging
+import traceback
 
 def debug_log(msg):
     try:
@@ -160,33 +161,33 @@ class TaskProgressWidget(QWidget):
         # 1. Name
         self.lbl_name = QLabel(filename)
         self.lbl_name.setFixedWidth(240)
-        self.lbl_name.setStyleSheet("color: #eee; font-weight: bold; font-size: 16px;") # 16px Main
+        self.lbl_name.setStyleSheet("color: #ffffff; font-weight: bold; font-size: 16px;") # Pure White
         self.lbl_name.setToolTip(filename)
         layout.addWidget(self.lbl_name)
 
         # 2. Status
         self.lbl_status = QLabel("Pending")
         self.lbl_status.setFixedWidth(140)
-        self.lbl_status.setStyleSheet("color: #aaa; font-size: 14px;") # 14px
+        self.lbl_status.setStyleSheet("color: #ffffff; font-size: 14px;") # Changed to White
         layout.addWidget(self.lbl_status)
 
         # 3. Format Info
         self.lbl_fmt_info = QLabel("-")
         self.lbl_fmt_info.setFixedWidth(260)
-        self.lbl_fmt_info.setStyleSheet("color: #ddd; font-size: 14px;") # 14px
+        self.lbl_fmt_info.setStyleSheet("color: #ffffff; font-size: 14px;") # Changed to White
         layout.addWidget(self.lbl_fmt_info)
 
         # 4. Time Range (In/Out)
         # 4. Time Range (Start - End)
         self.lbl_time_range = QLabel("-")
         self.lbl_time_range.setFixedWidth(180)
-        self.lbl_time_range.setStyleSheet("color: #888; font-size: 14px;") # 14px
+        self.lbl_time_range.setStyleSheet("color: #ffffff; font-size: 14px;") # Changed to White
         layout.addWidget(self.lbl_time_range)
 
         # 5. Performance
         self.lbl_perf = QLabel("")
         self.lbl_perf.setFixedWidth(140)
-        self.lbl_perf.setStyleSheet("color: #4CAF50; font-size: 14px;") # 14px
+        self.lbl_perf.setStyleSheet("color: #ffffff; font-size: 14px;") # Changed to White
         layout.addWidget(self.lbl_perf)
 
         # 6. Progress
@@ -200,18 +201,15 @@ class TaskProgressWidget(QWidget):
         # 7. Percent Label (Next to Progress Bar)
         self.lbl_percent = QLabel("")
         self.lbl_percent.setFixedWidth(60)
-        self.lbl_percent.setStyleSheet("color: #FFEE58; font-weight: bold; font-size: 13px;") # Larger
+        self.lbl_percent.setStyleSheet("color: #ffffff; font-weight: bold; font-size: 13px;") # Changed to White
         self.lbl_percent.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_percent)
 
-        
-        
-        
         # 7. Buttons
         self.btn_transcode = QToolButton()
         self.btn_transcode.setFixedSize(30, 30)
         self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24)) # Revert to Refresh (Original)
-        self.btn_transcode.setToolTip("開始轉碼 (Start Transcode)")
+        self.btn_transcode.setToolTip("當前任務轉碼 (Start Transcode)") # Requested Tooltip
         self.btn_transcode.setStyleSheet(self.get_btn_style("transparent"))
         self.btn_transcode.clicked.connect(self.toggle_transcode)
         layout.addWidget(self.btn_transcode)
@@ -254,12 +252,38 @@ class TaskProgressWidget(QWidget):
         self.output_path = ""
         self.workers = {} # Key: widget, Value: TranscodeWorker
         self.current_process = None 
-        self.task_data = None
+        self.player_ref = None # [NEW] Placeholder for main player reference
         self.task_data = None
         self.start_time = None
         self.end_time = None
         self.last_seen_percent = 0 # Track play progress
         self.stopped = False # Flag to block updates after stop
+
+    def set_done(self, out_path, player, speed_text):
+        """Called upon successful transcode completion"""
+        self.state = "done"
+        self.player_ref = player
+        self.output_path = out_path
+        
+        # UI Updates
+        self.lbl_status.setText("Done")
+        self.lbl_status.setStyleSheet("color: #00c853; font-weight: bold;")
+        self.lbl_perf.setText(speed_text)
+        self.lbl_percent.setText("100%")
+        
+        # Icon/Buttons
+        self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24))
+        self.btn_transcode.setToolTip("重新轉碼 (Re-Transcode)")
+        
+        self.btn_play_result.show()
+        self.btn_open_folder.show()
+        
+        # Reset Cancel Button to Close (Remove) style
+        self.btn_cancel.setFixedSize(30, 30)
+        self.btn_cancel.setIconSize(QSize(24, 24))
+        self.btn_cancel.setIcon(self.create_geometric_icon("close", "#ffffff", size=24))
+        self.btn_cancel.setToolTip("移除任務 (Remove)")
+        self.btn_cancel.setStyleSheet(self.get_btn_style("filled_close"))
 
     def get_btn_style(self, variant="transparent"):
         if variant == "filled_close":
@@ -327,11 +351,12 @@ class TaskProgressWidget(QWidget):
         else:
             self.lbl_time_range.setText("Full")
 
-        # Highlight Play Button
-        self.btn_play_result.setStyleSheet(self.play_style_active)
+        # Highlight Play Button (Actually, User wants ONLY at 100%)
+        # So we ensure it is hidden here
+        self.btn_play_result.hide() 
         self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24)) # Reset to Refresh icon for re-run
-        self.btn_transcode.setToolTip("重新轉碼 (Re-Transcode)")
-        self.state = "done"
+        self.btn_transcode.setToolTip("當前任務轉碼 (Start Transcode)") # Reset to initial state
+        self.state = "pending" # FIX: Set to pending, NOT done
 
     def toggle_transcode(self):
         state = getattr(self, 'state', 'pending') # Get current state, default to 'pending'
@@ -405,7 +430,7 @@ class TaskProgressWidget(QWidget):
                 
                 # Reset Transcode Button to Original (Refresh)
                 self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24))
-                self.btn_transcode.setToolTip("開始轉碼 (Start)")
+                self.btn_transcode.setToolTip("重新轉碼 (Re-Transcode)") # Changed to Re-transcode AFTER stop
                 
         else:
             # Just Remove
@@ -1309,6 +1334,7 @@ class ModernTranscoderUI(QMainWindow):
             }
         """)
         self.task_list.itemClicked.connect(self.on_task_item_clicked)
+        self.task_list.itemDoubleClicked.connect(self.on_task_item_double_clicked)
         mon_layout.addWidget(self.task_list)
         content_splitter.addWidget(monitor_widget)
         
@@ -1740,9 +1766,20 @@ class ModernTranscoderUI(QMainWindow):
              if widget_to_remove in self.workers:
                   print("DEBUG: Killing running task.")
                   worker = self.workers[widget_to_remove]
+                  # CRITICAL: Disconnect all signals to prevent callback to deleted widget
+                  try:
+                      worker.progress_signal.disconnect()
+                      worker.finished_signal.disconnect()
+                      worker.finished.disconnect()
+                  except:
+                      pass
                   widget_to_remove.lbl_status.setText("Cancelled")
-                  worker.kill()
-                  # Cleanup handled by finished signal
+                  # Fix for "Destroyed while thread is still running"
+                  if worker.isRunning():
+                        worker.terminate()
+                        worker.wait(100) # Give it time to die
+                  worker.deleteLater()
+                  del self.workers[widget_to_remove]
              elif getattr(self, 'current_running_task', None) and self.current_running_task.get("widget") == widget_to_remove:
                    # Fallback if somehow not in workers dict but marked as active
                    self.clean_up_after_task()
@@ -1808,8 +1845,19 @@ class ModernTranscoderUI(QMainWindow):
         final_base = f"{base_name}_{self.spin_seq.value():03d}"
         
         # Determine in/out
-        in_p = 0 if (full_duration or not source_path) else self.player.in_point
-        out_p = 0 if (full_duration or not source_path) else self.player.out_point
+        in_p = self.player.in_point if (not source_path or source_path == self.current_source) else 0
+        out_p = self.player.out_point if (not source_path or source_path == self.current_source) else 0
+        
+        # New: Use Global Worker Registry to prevent GC
+        if not hasattr(self, 'workers'): self.workers = {}
+        
+        if full_duration:
+            in_p = 0
+            out_p = 0
+
+        # Ensure integers
+        in_p = int(in_p) if in_p is not None else 0
+        out_p = int(out_p) if out_p is not None else 0
 
         # Prepare params
         task = {
@@ -1896,15 +1944,24 @@ class ModernTranscoderUI(QMainWindow):
         return QIcon(pixmap)
 
     def on_task_item_clicked(self, item):
+        # We might keep this for selection or simple highlighting
+        pass
+
+    def on_task_item_double_clicked(self, item):
         widget = self.task_list.itemWidget(item)
         if widget and widget.task_data:
             task = widget.task_data
             src = task.get("source")
             if src and os.path.exists(src):
                 # Load Source
+                # This will restore markers if original_source matches norm_path
                 self.player.load_video(src, is_result=False)
-                # Set In/Out
+                # Explicitly set In/Out for the selected task segment
                 self.player.set_in_out(task.get("in_point"), task.get("out_point"))
+                # Seek to IN point immediately
+                target_in = task.get("in_point", 0)
+                if target_in is None: target_in = 0
+                QTimer.singleShot(200, lambda: self.player.media_player.setPosition(target_in))
                 
                 # Feedback
                 if hasattr(self, 'statusBar'):
@@ -1987,8 +2044,6 @@ class ModernTranscoderUI(QMainWindow):
             "audio_gain": task.get("audio_gain", 0.0),
             "resolution": task.get("resolution"),
             "fps": task.get("fps"),
-            "resolution": task.get("resolution"),
-            "fps": task.get("fps"),
             "audio_ch": task.get("audio_ch"),
             "acodec": task.get("acodec", "aac") # Pass Audio Codec
         }
@@ -2017,9 +2072,18 @@ class ModernTranscoderUI(QMainWindow):
         cmd = tx.construct_command(src_norm, out_norm, transcode_params)
         
         # Use TranscodeWorker to ensure NO CONSOLE WINDOW on Windows
+        # Prevent double creation
+        if task["widget"] in self.workers:
+            old_worker = self.workers.pop(task["widget"])
+            old_worker.stop()
+            old_worker.wait()
+            old_worker.deleteLater()
+
         worker = TranscodeWorker(cmd, target_duration)
         worker.progress_signal.connect(lambda p, t: self.update_task_progress(task["widget"], p, t))
         worker.finished_signal.connect(lambda s, m: self.on_transcode_finished_worker(task, s, m, single_run))
+        # Ensure it is deleted even if finished_signal is missed (extra safety)
+        worker.finished.connect(worker.deleteLater)
         worker.start()
         
         self.workers[task["widget"]] = worker # Track worker
@@ -2027,72 +2091,69 @@ class ModernTranscoderUI(QMainWindow):
         task["widget"].set_started() # Ensure start time is recorded for UI
 
     def update_task_progress(self, widget, percent, text):
-        # The following code block is assumed to be part of the TaskProgressWidget class
-        # and is being called via `widget.update_progress(percent, text)`
-        # The user's instruction implies a change to the TaskProgressWidget class itself,
-        # but provides it in the context of `update_task_progress`.
-        # Since TaskProgressWidget is not defined here, I'm interpreting this as
-        # a call to a new method on the widget, which would then contain the logic.
-        # For the purpose of this edit, I will apply the blocking logic directly
-        # to the widget's progress update calls within this method, assuming
-        # `widget.stopped` is a new attribute on TaskProgressWidget.
+        try:
+            if not widget or getattr(widget, 'stopped', False): return # Block updates if stopped
 
-        if getattr(widget, 'stopped', False): return # Block updates if stopped
-
-        if percent == -1: # Indeterminate
-            widget.progress.setRange(0, 0)
-            widget.progress.setStyleSheet("QProgressBar { text-align: center; color: white; background-color: #222; border: 1px solid #333; border-radius: 6px; }") 
-        else:
-            widget.progress.setRange(0, 100)
-            widget.progress.setValue(percent)
-        if text:
-            widget.lbl_percent.setText(text)
+            if percent == -1: # Indeterminate
+                widget.progress.setRange(0, 0)
+                widget.progress.setStyleSheet("QProgressBar { text-align: center; color: white; background-color: #222; border: 1px solid #333; border-radius: 6px; }") 
+            else:
+                widget.progress.setRange(0, 100)
+                widget.progress.setValue(percent)
+            if text:
+                widget.lbl_percent.setText(text)
+        except RuntimeError:
+            pass # Widget likely deleted
+        except Exception as e:
+            debug_log(f"update_task_progress Error: {e}\n{traceback.format_exc()}")
         
-        # [NEW] Enable Play Result at 5% (User Request)
-        if percent >= 5 and hasattr(widget, 'btn_play_result'):
-            if not widget.btn_play_result.isVisible():
-                widget.btn_play_result.show()
-                widget.btn_play_result.setEnabled(True)
-                # Set initial green
-                widget.btn_play_result.setStyleSheet(widget.get_btn_style("green_active"))
-                widget.last_seen_percent = 5
-                
-                if widget.task_data and "output_path_ref" in widget.task_data:
-                    widget.output_path = widget.task_data["output_path_ref"]
-                    widget.player_ref = self.player
-
-            # Check for fresh content (every 5%)
-            elif percent >= getattr(widget, 'last_seen_percent', 0) + 5:
-                 widget.btn_play_result.setStyleSheet(widget.get_btn_style("green_active"))
+        # [REMOVED] Enable Play Result at 5% - User now wants ONLY at 100% DONE
 
 
     def on_transcode_finished_worker(self, task, success, msg, single_run):
-        widget = task["widget"]
-        if widget in self.workers:
-             del self.workers[widget]
-        
-        if success:
-           self.on_transcode_complete(0, QProcess.NormalExit, task, single_run)
-        else:
-           # Check if user voluntarily stopped it (don't show Failed)
-           if widget.lbl_status.text() == "Stopped":
-               # Already handled by stop logic
-               pass
-           else:
-               widget.lbl_status.setText(f"Failed")
-               widget.progress.setValue(0)
-               widget.lbl_status.setStyleSheet("color: #ff5252;")
-               print(f"Transcode Failed: {msg}")
-               
-               # Smart Suggestion Analysis
-               suggestion = self.analyze_error_suggestion(msg)
-               full_msg = f"錯誤詳情 (Error Details):\n{msg}\n\n💡 建議解法 (Smart Suggestion):\n{suggestion}"
-               # Only show critical if not "Task Cancelled" (which might come from worker)
-               if "Task Cancelled" not in msg:
-                   QMessageBox.critical(self, "轉碼失敗 (Transcode Failed)", full_msg)
+        try:
+            widget = task["widget"]
+            # Optimization: Worker is already finished, but we keep ref until complete logic is done
+            worker = self.workers.get(widget)
             
-           self.is_processing = False
-           self.clean_up_after_task()
+            if success:
+               self.on_transcode_complete(0, QProcess.NormalExit, task, single_run)
+            else:
+               if getattr(widget, 'lbl_status', None) and widget.lbl_status.text() == "Stopped":
+                   pass
+               else:
+                   if widget:
+                       widget.lbl_status.setText(f"Failed")
+                       widget.progress.setValue(0)
+                       widget.lbl_status.setStyleSheet("color: #ff5252;")
+                   print(f"Transcode Failed: {msg}")
+                   
+                   suggestion = self.analyze_error_suggestion(msg)
+                   full_msg = f"錯誤詳情 (Error Details):\n{msg}\n\n💡 建議解法 (Smart Suggestion):\n{suggestion}"
+                   if "Task Cancelled" not in msg:
+                       QMessageBox.critical(self, "轉碼失敗 (Transcode Failed)", full_msg)
+            
+               # CLEANUP WORKER IN FAILURE PATH
+               if widget in self.workers:
+                   worker = self.workers.pop(widget)
+                   try:
+                       worker.progress_signal.disconnect()
+                       worker.finished_signal.disconnect()
+                   except: pass
+                   worker.deleteLater()
+
+               if not single_run:
+                   self.process_next_task()
+               else:
+                   self.is_processing = False
+        except Exception as e:
+            debug_log(f"on_transcode_finished_worker Critical Error: {e}\n{traceback.format_exc()}")
+            # Critical protection: always cleanup worker on error
+            if widget in self.workers:
+                worker = self.workers.pop(widget)
+                worker.deleteLater()
+            self.is_processing = False
+            self.process_next_task()
            
     def analyze_error_suggestion(self, log_output):
         """Analyzes FFmpeg log to provide user-friendly troubleshooting advice."""
@@ -2118,61 +2179,69 @@ class ModernTranscoderUI(QMainWindow):
         return "未知錯誤。請嘗試:\n1. 更換輸出容器 (如 MP4)\n2. 使用 [重新解碼] 修復源檔\n3. 檢查磁碟空間"
 
     def on_transcode_complete(self, exit_code, exit_status, task, single_run):
-        widget = task["widget"]
-        start_time = task.get("start_time", 0)
-        target_duration = task.get("target_duration", 0)
-        output_path = task.get("output_path_ref", "")
-        
-        speed_text = ""
-        if exit_code != 0:
-             widget.lbl_status.setText(f"Failed ({exit_code})")
-             widget.progress.setStyleSheet("QProgressBar::chunk { background-color: #d32f2f; }")
-        else:
-            # Calculate Stats
-            duration_sec = time.time() - start_time
-            speed_text = f"{int(duration_sec)}s"
+        try:
+            widget = task["widget"]
+            start_time = task.get("start_time", 0)
+            target_duration = task.get("target_duration", 0)
+            output_path = task.get("output_path_ref", "")
             
-            if target_duration > 0:
-                speed = target_duration / duration_sec if duration_sec > 0 else 0
-                speed_text += f", {speed:.1f}x"
-            
-            widget.progress.setRange(0, 100)
-            widget.progress.setValue(100)
-            widget.progress.setStyleSheet("""
-                QProgressBar {
-                    background-color: #222;
-                    border: 1px solid #333;
-                    border-radius: 6px;
-                    text-align: center;
-                    color: white;
-                    font-size: 9px;
-                }
-                QProgressBar::chunk {
-                    background-color: #00c853;
-                    border-radius: 5px;
-                }
-            """)
-            
-            widget.set_done(output_path, self.player, speed_text)
-        
-        if not single_run:
-            self.process_next_task()
-        else:
-            for w in self.workers.values():
-                if w.isRunning():
-                    w.kill()
-                    w.wait()
-            self.is_processing = False
-            if self.pending_tasks:
-                self.btn_start_all.setEnabled(True)
+            speed_text = ""
+            if exit_code != 0:
+                 if widget:
+                     widget.lbl_status.setText(f"Failed ({exit_code})")
+                     widget.progress.setStyleSheet("QProgressBar::chunk { background-color: #d32f2f; }")
+            else:
+                duration_sec = time.time() - start_time
+                speed_text = f"{int(duration_sec)}s"
                 
-        self.is_finalizing = False
+                if target_duration > 0:
+                    speed = target_duration / duration_sec if duration_sec > 0 else 0
+                    speed_text += f", {speed:.1f}x"
+                
+                if widget:
+                    widget.progress.setRange(0, 100)
+                    widget.progress.setValue(100)
+                    widget.progress.setStyleSheet("""
+                        QProgressBar {
+                            background-color: #222; border: 1px solid #333; border-radius: 6px;
+                            text-align: center; color: white; font-size: 9px;
+                        }
+                        QProgressBar::chunk { background-color: #00c853; border-radius: 5px; }
+                    """)
+                    widget.set_done(output_path, self.player, speed_text)
+            
+            # SAFE CLEANUP: Remove worker from dict AFTER UI updates are finished
+            if widget in self.workers:
+                worker = self.workers.pop(widget)
+                try:
+                    worker.progress_signal.disconnect()
+                    worker.finished_signal.disconnect()
+                except: pass
+                worker.deleteLater() # Safely schedule deletion
+            
+            # Reset current task ref
+            if getattr(self, 'current_running_task', None) == task:
+                self.current_running_task = None
+
+            if not single_run:
+                self.process_next_task()
+            else:
+                self.is_processing = False
+                if self.pending_tasks:
+                    self.btn_start_all.setEnabled(True)
+        except Exception as e:
+            debug_log(f"on_transcode_complete Error: {e}\n{traceback.format_exc()}")
+            if not single_run: self.process_next_task()
+            else: self.is_processing = False
 
     def apply_styles(self):
         # Professional Dark Mode Stylesheet (Windows 11 inspired)
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #0f0f0f;
+            }
+            * {
+                font-size: 13px; /* Global fallback to prevent setPointSize <= 0 warning */
             }
             #sidebar {
                 background-color: #1a1a1a;
@@ -2226,6 +2295,13 @@ class ModernTranscoderUI(QMainWindow):
             }
             QMessageBox QPushButton:pressed {
                 background-color: #333;
+            }
+            QToolTip {
+                background-color: #000000 !important;
+                color: #ffffff !important;
+                border: 1px solid #ffffff;
+                padding: 4px;
+                font-size: 13px;
             }
         """)
 
@@ -2294,15 +2370,31 @@ class ModernTranscoderUI(QMainWindow):
              self.btn_start_all.setEnabled(True)
 
     def closeEvent(self, event):
+        """Standardized clean shutdown to prevent QThread crashes on exit."""
         try:
+            # 1. Stop all timers and save state
+            if hasattr(self, 'auto_save_timer'): self.auto_save_timer.stop()
+            self.save_settings()
+            
+            # 2. Force player and its sub-threads to shut down
             if hasattr(self, 'player') and self.player:
                 self.player.shutdown()
-            # Settings are saved on changes usually, but save here too just in case
-            if hasattr(self, 'settings'):
-                self.save_settings()
+                
+            # 3. Stop all active transcode worker threads
+            if hasattr(self, 'workers'):
+                for widget, worker in list(self.workers.items()):
+                    try:
+                        worker.blockSignals(True)
+                        worker.terminate() # Force kill if necessary on exit
+                        worker.wait(50)
+                        worker.deleteLater()
+                    except: pass
+                self.workers.clear()
+            
         except Exception as e:
             print(f"Error during shutdown: {e}")
-        event.accept()
+        finally:
+            event.accept()
 
     # --- History Menu Helpers ---
     def update_history_menus(self):
