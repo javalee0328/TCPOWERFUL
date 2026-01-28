@@ -710,6 +710,11 @@ class ModernTranscoderUI(QMainWindow):
         self.auto_save_timer.timeout.connect(self.auto_save)
         self.auto_save_timer.start(30000)  # 30 seconds
         
+        # Dongle removal detection timer (every 2 seconds)
+        self.dongle_monitor_timer = QTimer(self)
+        self.dongle_monitor_timer.timeout.connect(self.check_dongle_status)
+        self.dongle_monitor_timer.start(2000)  # 2 seconds
+        
         self.loading = False
         debug_log("MainWindow: Init Complete")
         
@@ -1021,7 +1026,12 @@ class ModernTranscoderUI(QMainWindow):
         sidebar_layout.setContentsMargins(0, 10, 0, 10)
         sidebar_layout.setSpacing(5)
         
-        self.btn_home = QPushButton("💿  Transcoder")
+        self.btn_home = QPushButton("金碼湛 Transcoder")
+        base_path = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.abspath(".")
+        logo_path = os.path.join(base_path, "assets", "logo.png")
+        if os.path.exists(logo_path):
+            self.btn_home.setIcon(QIcon(logo_path))
+            self.btn_home.setIconSize(QSize(24, 24))
         self.btn_dash = QPushButton("📊  Dashboard")
         self.btn_watch = QPushButton("👀  Watch Folders")
         self.btn_cluster = QPushButton("🖥  Cluster Status")
@@ -1251,7 +1261,7 @@ class ModernTranscoderUI(QMainWindow):
         
         # Playlist Controls
         pl_ctrl = QHBoxLayout()
-        lbl_pl_header = QLabel("待處理列表 (Playlist)")
+        lbl_pl_header = QLabel("源檔列表 (Source Files)")
         lbl_pl_header.setStyleSheet(HEADER_STYLE)
         pl_ctrl.addWidget(lbl_pl_header)
         pl_ctrl.addStretch()
@@ -1323,11 +1333,29 @@ class ModernTranscoderUI(QMainWindow):
         
         # Playlist Widget
         self.playlist = QListWidget()
-        self.playlist.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.playlist.setSelectionMode(QAbstractItemView.MultiSelection) # [NEW] Toggle selection behavior
+        self.playlist.setAlternatingRowColors(True) # [NEW] Alternate background colors
         self.playlist.setStyleSheet("""
-            QListWidget { background-color: #1a1a1a; border: 1px solid #333; border-radius: 3px; color: #ddd; font-size: 13px; }
-            QListWidget::item { padding: 5px; }
-            QListWidget::item:selected { background-color: #0078d4; color: white; }
+            QListWidget { 
+                background-color: #1a1a1a; 
+                alternate-background-color: #2a2a2a; /* [NEW] Light grey separation */
+                border: 1px solid #333; 
+                border-radius: 3px; 
+                color: #ddd; 
+                font-size: 13px; 
+            }
+            QListWidget::item { 
+                padding: 8px; 
+                border-bottom: 1px solid #222; 
+            }
+            QListWidget::item:selected { 
+                background-color: #2d5f9e; 
+                color: white; 
+                border-left: 3px solid #4A9EFF;
+            }
+            QListWidget::item:hover {
+                background-color: rgba(255, 255, 255, 0.05);
+            }
         """)
         self.playlist.itemPressed.connect(self.on_playlist_item_clicked)
         params_layout.addWidget(self.playlist, 1)
@@ -2328,6 +2356,12 @@ class ModernTranscoderUI(QMainWindow):
         
         # Increment seq for next manually added task
         self.spin_seq.setValue(self.spin_seq.value() + 1)
+        
+        # [NEW] Clear dirty status after task is queued
+        if hasattr(self, 'player'):
+            self.player._is_dirty = False
+            self.player.update_trim_labels()
+            
         self.save_settings()
 
     def add_all_to_queue(self):
@@ -2835,11 +2869,61 @@ class ModernTranscoderUI(QMainWindow):
         if self.pending_tasks:
              self.btn_start_all.setEnabled(True)
 
+    def check_dongle_status(self):
+        """Check if dongle is still connected, warn with countdown and close if removed."""
+        try:
+            from core.security import LicenseManager
+            lm = LicenseManager()
+            allowed, msg, _ = lm.check_protection()
+            
+            if not allowed:
+                # Stop main monitor timer
+                self.dongle_monitor_timer.stop()
+                
+                # Show special alert dialog with countdown
+                from ui.startup_dialog import StartupCheckDialog
+                alert_dlg = StartupCheckDialog(self)
+                
+                # Countdown timer for the dialog
+                self._countdown = 60
+                
+                def update_countdown():
+                    self._countdown -= 1
+                    alert_dlg.set_dongle_removed(self._countdown)
+                    
+                    # Re-check if dongle is inserted
+                    is_back, _, _ = lm.check_protection()
+                    if is_back:
+                        timer.stop()
+                        alert_dlg.accept()
+                        self.dongle_monitor_timer.start(2000) # Resume monitoring
+                    
+                    if self._countdown <= 0:
+                        timer.stop()
+                        QApplication.quit()
+
+                timer = QTimer(alert_dlg)
+                timer.timeout.connect(update_countdown)
+                timer.start(1000)
+                
+                alert_dlg.set_dongle_removed(self._countdown)
+                alert_dlg.exec()
+                
+                # If we exit the dialog (via Exit button), quit app
+                if not lm.check_protection()[0]:
+                    QApplication.quit()
+
+        except Exception as e:
+            debug_log(f"Dongle check error: {e}")
+            # If there's an error during check (e.g. driver fail), treat as removal for safety
+            QApplication.quit()
+
     def closeEvent(self, event):
         """Standardized clean shutdown to prevent QThread crashes on exit."""
         try:
             # 1. Stop all timers and save state
             if hasattr(self, 'auto_save_timer'): self.auto_save_timer.stop()
+            if hasattr(self, 'dongle_monitor_timer'): self.dongle_monitor_timer.stop()
             self.save_settings()
             
             # 2. Force player and its sub-threads to shut down

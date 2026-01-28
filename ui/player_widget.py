@@ -871,6 +871,8 @@ class VideoPlayerWidget(QWidget):
             else:
                 lbl.setStyleSheet(base + "background-color: transparent; color: #777;")
 
+        dirty_mark = " *" if getattr(self, '_is_dirty', False) else ""
+        
         in_txt = self.format_time(self.in_point) if self.in_point is not None else "--"
         out_txt = self.format_time(self.out_point) if self.out_point is not None else "--"
         
@@ -880,10 +882,10 @@ class VideoPlayerWidget(QWidget):
         dur_txt = self.format_time(dur) if dur > 0 else "--"
         
         # Update Trim Labels
-        self.lbl_in.setText(f"IN: {in_txt}")
+        self.lbl_in.setText(f"IN: {in_txt}{dirty_mark}")
         set_style(self.lbl_in, self.in_point is not None)
         
-        self.lbl_out.setText(f"OUT: {out_txt}")
+        self.lbl_out.setText(f"OUT: {out_txt}{dirty_mark}")
         set_style(self.lbl_out, self.out_point is not None)
         
         # [NEW] Force Slider Marker Update
@@ -896,6 +898,19 @@ class VideoPlayerWidget(QWidget):
         
         self.lbl_dur.setText(f"DUR: {dur_txt}")
         set_style(self.lbl_dur, dur > 0)
+        
+        # [NEW] Update button tooltips based on marker state
+        # Only update if NOT playing result (result always shows 到頭/到尾)
+        if not getattr(self, '_is_playing_result', False):
+            if self.in_point is not None:
+                self.btn_seek_in.setToolTip("跳轉至入點 (Go to IN)")
+            else:
+                self.btn_seek_in.setToolTip("回到片頭 (Go to Start)")
+            
+            if self.out_point is not None:
+                self.btn_seek_out.setToolTip("跳轉至出點 (Go to OUT)")
+            else:
+                self.btn_seek_out.setToolTip("跳至片尾 (Go to End)")
 
     def open_deinterlace_window(self):
         if not self.current_file: return
@@ -953,15 +968,19 @@ class VideoPlayerWidget(QWidget):
     def load_video(self, file_path, is_result=False, start_pos=-1):
         norm_path = os.path.normpath(file_path)
         
-        if self.current_file and self.original_source:
-             if self._paths_match(self.current_file, self.original_source):
+        # [NEW] Save current position before switching
+        if self.current_file:
+             if self._paths_match(self.current_file, self.original_source) and not getattr(self, '_is_playing_result', False):
                  self.source_position = self.media_player.position()
+             elif getattr(self, '_is_playing_result', False):
+                 self.result_position = self.media_player.position()
 
         target_pos = 0
         if not is_result:
             if start_pos >= 0:
-                self.source_position = start_pos
-            target_pos = self.source_position
+                target_pos = start_pos
+            elif self.original_source and self._paths_match(norm_path, self.original_source):
+                target_pos = self.source_position
             
             # Restore markers if returning to the same original source
             if self.original_source and self._paths_match(norm_path, self.original_source):
@@ -972,19 +991,23 @@ class VideoPlayerWidget(QWidget):
                 
                 # Restore UI Markers
                 self.set_in_out(self.in_point, self.out_point)
+                self._is_dirty = False # Reset dirty state on re-load matching source
             else:
                 # NEW source loaded - clear everything
                 self.in_point = None
                 self.out_point = None
                 self.set_in_out(None, None)
-            
+                self.source_position = 0
+                self._is_dirty = False
+
             self.original_source = norm_path
         else:
             # Switching TO result - save current source markers first
             if not getattr(self, '_is_playing_result', False):
                 self.saved_source_in = self.in_point
                 self.saved_source_out = self.out_point
-            target_pos = 0 
+            
+            target_pos = start_pos if start_pos >= 0 else 0
 
         self.current_file = norm_path
         self.pending_seek_pos = target_pos
@@ -1028,8 +1051,6 @@ class VideoPlayerWidget(QWidget):
         
         if is_result:
             self.last_result_file = norm_path
-            # pending_seek_pos already set above
-            if start_pos >= 0: self.pending_seek_pos = start_pos
             # Reset Trim Markers when viewing result (full file)
             self.set_in_out(None, None)
             
@@ -1040,14 +1061,11 @@ class VideoPlayerWidget(QWidget):
             self.vu.set_color_mode("green")
         else:
             # Update UI for Source View
-            self.btn_seek_in.setToolTip("跳轉至入點 (Go to IN)")
-            self.btn_seek_out.setToolTip("跳轉至出點 (Go to OUT)")
+            # Tooltips will be set by update_trim_labels() based on marker state
             # [NEW] Set VU to Blue
             self.vu.set_color_mode("blue")
                 
         self.media_player.setSource(QUrl.fromLocalFile(norm_path))
-        # REMOVED auto play: self.media_player.play() 
-        # Instead, we pause by default?
         self.media_player.pause() # Ensure it starts paused
 
     def set_in_out(self, in_point, out_point):
@@ -1296,16 +1314,19 @@ class VideoPlayerWidget(QWidget):
 
     def set_in_point(self):
         self.in_point = self.media_player.position()
+        self._is_dirty = True
         self.update_trim_labels()
         
     def set_out_point(self):
         self.out_point = self.media_player.position()
+        self._is_dirty = True
         self.update_trim_labels()
     
     def clear_in_out_points(self):
         """Clear both IN and OUT points"""
         self.in_point = None
         self.out_point = None
+        self._is_dirty = False
         self.update_trim_labels()
         # Update slider visualization
         duration = self.media_player.duration()

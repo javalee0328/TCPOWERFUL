@@ -15,10 +15,18 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     app = QApplication(sys.argv)
     
+    # Set application icon
+    from PySide6.QtGui import QIcon
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.ico")
+    if hasattr(sys, '_MEIPASS'):
+        icon_path = os.path.join(sys._MEIPASS, "assets", "icon.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+    
     # --- Single Instance Check (Triple-Lock: Mutex + LockFile + SharedMem) ---
     import ctypes
     from PySide6.QtWidgets import QMessageBox
-    from PySide6.QtCore import Qt, QLockFile, QDir, QSharedMemory
+    from PySide6.QtCore import Qt, QLockFile, QDir, QSharedMemory, QTimer
     
     # 1. Mutex Check (Primary for Windows)
     MUTEX_NAME = "ProTranscoder_Single_Instance_Mutex"
@@ -89,25 +97,44 @@ if __name__ == "__main__":
         main_debug_log("Starting Application Init...")
         app.setApplicationName("ProTranscoder 2026")
         
-        # --- Mandatory Hardware Protection (SafeNet Sentinel) ---
+        # --- Two-Stage Hardware Protection Check ---
+        from ui.startup_dialog import StartupCheckDialog
         from core.security import LicenseManager
+        
+        # Create and show startup dialog
+        startup_dlg = StartupCheckDialog()
+        startup_dlg.show()
+        app.processEvents()
+        
+        # Stage 1: Driver Check
+        startup_dlg.set_stage_1()
+        app.processEvents()
+        QTimer.singleShot(500, lambda: None)  # Brief pause for visual feedback
+        app.processEvents()
+        
+        # Create License Manager
         lm = LicenseManager()
+        
+        # Stage 2: Dongle Detection with Auto-Detection
+        startup_dlg.set_stage_2(lm)  # Pass LicenseManager for auto-detection
+        # Initial check
         allowed, status_msg, ids = lm.check_protection()
         
-        if not allowed:
-            main_debug_log(f"Access Denied: {status_msg}")
-            msg = QMessageBox()
-            msg.setIcon(QMessageBox.Warning)
-            msg.setWindowTitle("授權驗證失敗 (License Error)")
-            msg.setText("未偵測到 SafeNet 加密鎖 (Dongle Not Found)")
-            msg.setInformativeText("請插入 SafeNet Sentinel 加密鎖後重試。\n(Please insert the hardware key and try again.)")
-            msg.setStandardButtons(QMessageBox.Ok)
-            # Styling for dark mode compatibility if needed
-            msg.setStyleSheet("QLabel { color: #000; }") 
-            msg.exec()
+        if allowed:
+            # Dongle already present
+            main_debug_log(f"License Verified: {status_msg}")
+            startup_dlg.set_success(status_msg)
+            QTimer.singleShot(800, startup_dlg.accept)
+        
+        # Show dialog (will auto-detect if dongle not yet present)
+        result = startup_dlg.exec()
+        
+        if not startup_dlg.check_result:
+            # User clicked Exit or dialog was rejected
+            main_debug_log("User cancelled startup")
             sys.exit(0)
-            
-        main_debug_log(f"License Verified: {status_msg}")
+        
+        main_debug_log(f"License Verified: Proceeding to main window")
         
         main_debug_log("Initializing MainWindow...")
         window = ModernTranscoderUI()
