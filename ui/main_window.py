@@ -15,9 +15,12 @@ from PySide6.QtGui import QIcon, QAction, QKeySequence, QShortcut, QPixmap, QPai
 from core.settings import SettingsManager
 from core.metadata import get_video_metadata
 from core.preset_data import PRESETS
+from core.watch_folder import WatchFolderEngine
+from core.cluster_manager import ClusterManager
 import subprocess
 import logging
 import traceback
+import re
 
 def debug_log(msg):
     try:
@@ -101,30 +104,25 @@ class TranscodeWorker(QThread):
             except: pass
 
     def stop(self):
-        self.kill()
+        self.killed = True
 
     def pause(self):
-        if self._process and self._process.pid:
+        self.paused = True
+        if self._process:
+            # Send 'p' to ffmpeg to pause
             try:
-                self.paused = True
-                # Windows Suspend (using ntdll)
-                handle = ctypes.windll.kernel32.OpenProcess(0x1F0FFF, False, self._process.pid)
-                if handle:
-                    ctypes.windll.ntdll.NtSuspendProcess(handle)
-                    ctypes.windll.kernel32.CloseHandle(handle)
-            except Exception as e:
-                debug_log(f"Pause Failed: {e}")
+                self._process.stdin.write('p')
+                self._process.stdin.flush()
+            except: pass
 
     def resume(self):
-        if self._process and self._process.pid:
+        self.paused = False
+        if self._process:
+            # Send 'p' to ffmpeg to resume
             try:
-                self.paused = False
-                handle = ctypes.windll.kernel32.OpenProcess(0x1F0FFF, False, self._process.pid)
-                if handle:
-                    ctypes.windll.ntdll.NtResumeProcess(handle)
-                    ctypes.windll.kernel32.CloseHandle(handle)
-            except Exception as e:
-                debug_log(f"Resume Failed: {e}")
+                self._process.stdin.write('p')
+                self._process.stdin.flush()
+            except: pass
 
     def parse_line(self, line):
         if "out_time_us=" in line:
@@ -142,6 +140,19 @@ class TranscodeWorker(QThread):
                     self.progress_signal.emit(-1, "Busy")
             except:
                 pass
+
+class DongleCheckThread(QThread):
+    """Background hardware lock check to prevent UI stuttering."""
+    result_ready = Signal(bool, str, list) # allowed, msg, ids
+
+    def run(self):
+        try:
+            from core.security import LicenseManager
+            lm = LicenseManager()
+            allowed, msg, ids = lm.check_protection()
+            self.result_ready.emit(allowed, msg, ids)
+        except Exception as e:
+            self.result_ready.emit(False, str(e), [])
 
 class SmartFailureDialog(QDialog):
     """Professional dialog to translate technical errors into actionable solutions."""
@@ -257,7 +268,18 @@ class TaskProgressWidget(QWidget):
         self.lbl_perf.setStyleSheet("color: #ffffff; font-size: 14px;") # Changed to White
         layout.addWidget(self.lbl_perf)
 
-        # 6. Progress
+        # [NEW] 6. Source & Worker
+        self.lbl_source = QLabel("Manual")
+        self.lbl_source.setFixedWidth(120)
+        self.lbl_source.setStyleSheet("color: #90caf9; font-size: 13px;") 
+        layout.addWidget(self.lbl_source)
+
+        self.lbl_worker = QLabel("-")
+        self.lbl_worker.setFixedWidth(60)
+        self.lbl_worker.setStyleSheet("color: #ce93d8; font-size: 13px;")
+        layout.addWidget(self.lbl_worker)
+
+        # 7. Progress
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
@@ -265,14 +287,27 @@ class TaskProgressWidget(QWidget):
         self.progress.setTextVisible(False) # HIDE TEXT INSIDE BAR
         layout.addWidget(self.progress, 1) # Expand progress to fill space
 
-        # 7. Percent Label (Next to Progress Bar)
+        # 8. Percent Label (Next to Progress Bar)
         self.lbl_percent = QLabel("")
         self.lbl_percent.setFixedWidth(60)
         self.lbl_percent.setStyleSheet("color: #ffffff; font-weight: bold; font-size: 13px;") # Changed to White
         self.lbl_percent.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_percent)
 
-        # 7. Buttons
+        # 9. Finish Time
+        self.lbl_finish = QLabel("-")
+        self.lbl_finish.setFixedWidth(140)
+        self.lbl_finish.setStyleSheet("color: #81c784; font-size: 13px;")
+        layout.addWidget(self.lbl_finish)
+
+        # 10. Target Path (New)
+        self.lbl_target = QLabel("-")
+        self.lbl_target.setFixedWidth(200)
+        self.lbl_target.setStyleSheet("color: #ffa726; font-size: 12px;")
+        self.lbl_target.setToolTip("-")
+        layout.addWidget(self.lbl_target)
+
+        # 9. Buttons
         self.btn_transcode = QToolButton()
         self.btn_transcode.setFixedSize(30, 30)
         self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24)) # Revert to Refresh (Original)
@@ -421,6 +456,24 @@ class TaskProgressWidget(QWidget):
             self.lbl_time_range.setText(f"{ms_to_fmt(in_p)} - {ms_to_fmt(out_p)}")
         else:
             self.lbl_time_range.setText("Full")
+
+        # [NEW] Source & Worker Info
+        source_type = task.get("source_type", "Manual")
+        self.lbl_source.setText(source_type)
+        if source_type != "Manual":
+            self.lbl_source.setStyleSheet("color: #ff9800; font-weight: bold; font-size: 13px;") # Highlight folder tasks
+        else:
+            self.lbl_source.setStyleSheet("color: #90caf9; font-size: 13px;")
+
+        worker_id = task.get("worker_id", "-")
+        self.lbl_worker.setText(worker_id)
+
+        finish_time = task.get("finish_time", "-")
+        self.lbl_finish.setText(finish_time)
+        
+        target_dir = task.get("output_dir", "-")
+        self.lbl_target.setText(os.path.basename(target_dir))
+        self.lbl_target.setToolTip(target_dir)
 
         # Highlight Play Button (Actually, User wants ONLY at 100%)
         # So we ensure it is hidden here
@@ -693,6 +746,17 @@ class ModernTranscoderUI(QMainWindow):
         self.workers = {} # Key: widget, Value: TranscodeWorker
         self.is_processing = False
         
+        # [NEW] Initialize Watch Folder Engine
+        self.watch_engine = WatchFolderEngine(self.settings, self)
+        self.watch_engine.file_detected.connect(self.on_watch_folder_detected)
+        self.watch_engine.start()
+        
+        # [NEW] Initialize Cluster Manager
+        self.cluster_mgr = ClusterManager(self.settings, self)
+        self.cluster_mgr.task_synced.connect(self.on_cluster_task_synced)
+        self.cluster_mgr.node_updated.connect(self.on_cluster_node_updated)
+        self.cluster_mgr.start()
+
         debug_log("MainWindow: Calling setup_ui")
         self.setup_ui()
         
@@ -710,12 +774,13 @@ class ModernTranscoderUI(QMainWindow):
         self.auto_save_timer.timeout.connect(self.auto_save)
         self.auto_save_timer.start(30000)  # 30 seconds
         
-        # Dongle removal detection timer (every 2 seconds)
+        # Dongle removal detection timer (every 10 seconds - Asynchronous)
         self.dongle_monitor_timer = QTimer(self)
         self.dongle_monitor_timer.timeout.connect(self.check_dongle_status)
-        self.dongle_monitor_timer.start(2000)  # 2 seconds
+        self.dongle_monitor_timer.start(10000)  # 10 seconds
         
         self.loading = False
+        
         debug_log("MainWindow: Init Complete")
         
 
@@ -1027,7 +1092,8 @@ class ModernTranscoderUI(QMainWindow):
         sidebar_layout.setSpacing(5)
         
         self.btn_home = QPushButton("金碼湛 Transcoder")
-        base_path = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.abspath(".")
+        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        base_path = sys._MEIPASS if hasattr(sys, '_MEIPASS') else script_dir
         logo_path = os.path.join(base_path, "assets", "logo.png")
         if os.path.exists(logo_path):
             self.btn_home.setIcon(QIcon(logo_path))
@@ -1039,7 +1105,10 @@ class ModernTranscoderUI(QMainWindow):
         
         for btn in [self.btn_home, self.btn_dash, self.btn_watch, self.btn_cluster, self.btn_settings]:
             btn.setCheckable(True)
+            btn.clicked.connect(lambda checked=True, b=btn: self.on_nav_clicked(b))
             sidebar_layout.addWidget(btn)
+        
+        self.btn_home.setChecked(True)
             
         sidebar_layout.addStretch()
         main_layout.addWidget(self.sidebar)
@@ -1047,11 +1116,38 @@ class ModernTranscoderUI(QMainWindow):
         # 2. Main Content Area (Stacked)
         stack_container = QWidget()
         self.stack = QStackedLayout(stack_container)
-        
+        main_layout.addWidget(stack_container, 1)
+
         # --- Page 0: Transcoder (Home) ---
         self.transcoder_page = QWidget()
         trans_layout = QVBoxLayout(self.transcoder_page)
-        trans_layout.setContentsMargins(0,0,0,0)
+        trans_layout.setContentsMargins(10, 10, 10, 10)
+        self.stack.addWidget(self.transcoder_page)
+
+        # --- Page 1: Watch Folders ---
+        self.watch_page = QWidget()
+        w_layout = QVBoxLayout(self.watch_page)
+        w_title = QLabel("📂 監控資料夾設定 (Watch Folder Settings)")
+        w_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #4CAF50;")
+        w_layout.addWidget(w_title)
+        self.watch_list = QListWidget()
+        w_layout.addWidget(self.watch_list)
+        w_btn_add = QPushButton("添加監控路徑 (Add Path)")
+        w_btn_add.clicked.connect(self.add_watch_folder_ui)
+        w_layout.addWidget(w_btn_add)
+        self.stack.addWidget(self.watch_page)
+
+        # --- Page 2: Cluster Status ---
+        self.cluster_page = QWidget()
+        cl_layout = QVBoxLayout(self.cluster_page)
+        cl_title = QLabel("🖥 集群節點狀態 (Cluster Nodes)")
+        cl_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #BB86FC;")
+        cl_layout.addWidget(cl_title)
+        self.node_list = QListWidget()
+        cl_layout.addWidget(self.node_list)
+        self.lbl_node_info = QLabel("本機辨識碼 (Local Node): -")
+        cl_layout.addWidget(self.lbl_node_info)
+        self.stack.addWidget(self.cluster_page)
         
         content_splitter = QSplitter(Qt.Vertical)
         
@@ -1078,12 +1174,30 @@ class ModernTranscoderUI(QMainWindow):
         self.player.videoLoaded.connect(self.on_video_loaded)
         player_col_layout.addWidget(self.player, 1) # Expand Player
         
+        # --- Page 3: Settings ---
+        self.settings_page = QWidget()
+        s_layout = QVBoxLayout(self.settings_page)
+        s_title = QLabel("⚙ 全局設定 (Global Settings)")
+        s_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #757575;")
+        s_layout.addWidget(s_title)
+        
+        s_form = QGridLayout()
+        s_form.addWidget(QLabel("集群同步路徑 (Cluster Sync Path):"), 0, 0)
+        self.edit_cluster_path = QLineEdit(self.settings.get("cluster_path", ""))
+        s_form.addWidget(self.edit_cluster_path, 0, 1)
+        
+        btn_save_s = QPushButton("儲存設定 (Save Settings)")
+        btn_save_s.clicked.connect(self.save_global_settings_ui)
+        s_layout.addLayout(s_form)
+        s_layout.addWidget(btn_save_s)
+        s_layout.addStretch()
+        self.stack.addWidget(self.settings_page)
+
         debug_log("setup_ui: Creating Buttons")
         # Action Bar (Add Task + Start All)
         action_bar = QHBoxLayout()
         action_bar.setSpacing(10)
         
-        # Large "Add Task" Button
         self.btn_large_add = QPushButton(" + 添加任務 (Add to Queue)")
         self.btn_large_add.setCursor(Qt.PointingHandCursor)
         self.btn_large_add.setToolTip("將目前設定加入排程 (快速鍵: Enter)")
@@ -1677,8 +1791,28 @@ class ModernTranscoderUI(QMainWindow):
         mon_header.addWidget(self.btn_clear_list)
         
         mon_layout.addLayout(mon_header)
+
+        # [NEW] Dashboard Header
+        db_header = QFrame()
+        db_header.setFixedHeight(30)
+        db_header.setStyleSheet("background-color: #333; border-bottom: 1px solid #444;")
+        dbh_layout = QHBoxLayout(db_header)
+        dbh_layout.setContentsMargins(15, 0, 5, 0)
+        dbh_layout.setSpacing(10)
         
-        self.task_list = QListWidget()
+        col_lbls = [
+            ("任務名稱", 240), ("狀態", 140), ("格式資訊", 260), 
+            ("時間範圍", 220), ("效能", 140), ("來源", 120), 
+            ("節點", 60), ("進度", 100), ("完成時間", 140),
+            ("目標路徑", 200)
+        ]
+        for txt, w in col_lbls:
+            l = QLabel(txt)
+            l.setFixedWidth(w)
+            l.setStyleSheet("color: #888; font-size: 11px; font-weight: bold;")
+            dbh_layout.addWidget(l)
+        dbh_layout.addStretch()
+        mon_layout.addWidget(db_header)
         self.task_list.setAlternatingRowColors(True)
         self.task_list.setStyleSheet("""
             QListWidget {
@@ -1699,34 +1833,6 @@ class ModernTranscoderUI(QMainWindow):
         content_splitter.addWidget(monitor_widget)
         
         trans_layout.addWidget(content_splitter)
-        
-        # --- Other Pages ---
-        self.dash_page = QLabel("Dashboard\n(Coming Soon)")
-        self.dash_page.setAlignment(Qt.AlignCenter)
-        self.dash_page.setStyleSheet("color: #555; font-size: 20px;")
-        
-        self.watch_page = QLabel("Watch Folders\n(Coming Soon)")
-        self.watch_page.setAlignment(Qt.AlignCenter)
-        self.watch_page.setStyleSheet("color: #555; font-size: 20px;")
-        
-        self.settings_page = QLabel("Global Settings\n(Coming Soon)")
-        self.settings_page.setAlignment(Qt.AlignCenter)
-        self.settings_page.setStyleSheet("color: #555; font-size: 20px;")
-        
-        # Add to Stack
-        self.stack.addWidget(self.transcoder_page) # 0
-        self.stack.addWidget(self.dash_page)       # 1
-        self.stack.addWidget(self.watch_page)      # 2
-        self.stack.addWidget(self.settings_page)   # 3
-        
-        main_layout.addWidget(stack_container)
-        
-        # Connect buttons
-        self.btn_home.clicked.connect(lambda: self.stack.setCurrentIndex(0))
-        self.btn_dash.clicked.connect(lambda: self.stack.setCurrentIndex(1))
-        self.btn_watch.clicked.connect(lambda: self.stack.setCurrentIndex(2))
-        self.btn_cluster.clicked.connect(lambda: self.stack.setCurrentIndex(1)) 
-        self.btn_settings.clicked.connect(lambda: self.stack.setCurrentIndex(3))
 
     def add_files(self):
         start_dir = getattr(self, 'last_source_dir', "")
@@ -2285,16 +2391,17 @@ class ModernTranscoderUI(QMainWindow):
                  # Actually simply check queue state
                  self.btn_start_all.setEnabled(bool(self.pending_tasks))
 
-    def add_task_to_queue(self, source_path=None, full_duration=False):
-        print("DEBUG: add_task_to_queue triggered")
+    def add_task_to_queue(self, source_path=None, full_duration=False, source_type="Manual", worker_id="-", preset_name=None):
+        print(f"DEBUG: add_task_to_queue triggered. Source: {source_type}")
         target_source = source_path if source_path else self.current_source
         
         if not target_source:
-            QMessageBox.warning(self, "無來源 (No Source)", "請先載入或播放一個影片檔案 (Please load a video first)")
-            return
+             if source_type == "Manual":
+                QMessageBox.warning(self, "無來源 (No Source)", "請先載入或播放一個影片檔案 (Please load a video first)")
+             return
             
         # Capture current naming
-        if self.chk_rename.isChecked() and self.edit_base_name.text().strip():
+        if self.chk_rename.isChecked() and self.edit_base_name.text().strip() and source_type == "Manual":
             base_name = self.edit_base_name.text().strip()
         else:
             base_name = os.path.splitext(os.path.basename(target_source))[0]
@@ -2330,10 +2437,25 @@ class ModernTranscoderUI(QMainWindow):
             "audio_gain": 'auto' if self.btn_auto_gain.isChecked() else self.spin_gain.value(),
             "resolution": getattr(self, 'current_preset_extra', {}).get("resolution"),
             "fps": getattr(self, 'current_preset_extra', {}).get("fps"),
-            "fps": self.combo_fps.currentText() if hasattr(self, 'combo_fps') else None,
+            "fps_text": self.combo_fps.currentText() if hasattr(self, 'combo_fps') else None,
             "audio_ch": getattr(self, 'current_preset_extra', {}).get("audio_ch"),
-            "acodec": self.combo_acode.currentText()
+            "acodec": self.combo_acode.currentText(),
+            "source_type": source_type,
+            "worker_id": worker_id
         }
+
+        # Override with preset if provided (for Watch Folder)
+        if preset_name and preset_name in PRESETS:
+             p = PRESETS[preset_name]
+             task.update({
+                 "container": p.get("container", task["container"]),
+                 "vcodec": p.get("vcodec", task["vcodec"]),
+                 "bitrate": str(p.get("bitrate", task["bitrate"])),
+                 "resolution": p.get("resolution", task["resolution"]),
+                 "fps_text": p.get("fps", task["fps_text"]),
+                 "acodec": p.get("acodec", task["acodec"]),
+                 "audio_ch": p.get("audio_ch", task["audio_ch"])
+             })
         
         # Add a visual entry in the list as "Pending"
         item = QListWidgetItem(self.task_list)
@@ -2353,6 +2475,10 @@ class ModernTranscoderUI(QMainWindow):
         # Atomic Add: Only append to queue after successful setup
         self.pending_tasks.append(task)
         self.btn_start_all.setEnabled(True)
+        
+        # [NEW] Broadcast to Cluster (if not already from cluster)
+        if source_type == "Manual" or source_type == "WatchFolder":
+             self.cluster_mgr.broadcast_task(task)
         
         # Increment seq for next manually added task
         self.spin_seq.setValue(self.spin_seq.value() + 1)
@@ -2568,6 +2694,83 @@ class ModernTranscoderUI(QMainWindow):
         task["widget"].lbl_status.setText("Transcoding...")
         task["widget"].set_started() # Ensure start time is recorded for UI
 
+    def on_nav_clicked(self, clicked_btn):
+        # Uncheck others
+        for btn in [self.btn_home, self.btn_dash, self.btn_watch, self.btn_cluster, self.btn_settings]:
+            btn.setChecked(btn == clicked_btn)
+        
+        # Switch Page
+        if clicked_btn in [self.btn_home, self.btn_dash]:
+             self.stack.setCurrentIndex(0) 
+        elif clicked_btn == self.btn_watch:
+             self.refresh_watch_list_ui()
+             self.stack.setCurrentIndex(1)
+        elif clicked_btn == self.btn_cluster:
+             self.refresh_cluster_ui()
+             self.stack.setCurrentIndex(2)
+        elif clicked_btn == self.btn_settings:
+             self.stack.setCurrentIndex(3)
+
+    def save_global_settings_ui(self):
+        self.settings.set("cluster_path", self.edit_cluster_path.text())
+        self.save_settings()
+        QMessageBox.information(self, "Success", "設定已儲存 (Settings Saved)")
+
+    def refresh_watch_list_ui(self):
+        self.watch_list.clear()
+        for wf in self.settings.get("watch_folders", []):
+            self.watch_list.addItem(f"{wf.get('name')} -> {wf.get('path')} [{wf.get('preset')}]")
+
+    def refresh_cluster_ui(self):
+        self.lbl_node_info.setText(f"本機辨識碼 (Local Node): {self.cluster_mgr.node_id}")
+        self.node_list.clear()
+        for nid, data in self.cluster_mgr._known_nodes.items():
+            self.node_list.addItem(f"{nid} - {data.get('status')} (IP: {data.get('ip')})")
+
+    def show_watch_folder_page(self): # Compatibility or removed
+        self.on_nav_clicked(self.btn_watch)
+
+    def show_cluster_page(self): # Compatibility or removed
+        self.on_nav_clicked(self.btn_cluster)
+
+    def add_watch_folder_ui(self):
+        path = QFileDialog.getExistingDirectory(self, "選擇監控資料夾")
+        if path:
+            name, ok = QInputDialog.getText(self, "資料夾名稱", "請輸入識別名稱:")
+            if ok and name:
+                 presets = list(PRESETS.keys())
+                 preset, ok2 = QInputDialog.getItem(self, "選擇轉碼預設", "請選擇該資料夾對應的格式:", presets, 0, False)
+                 if ok2:
+                     current = self.settings.get("watch_folders", [])
+                     current.append({"name": name, "path": path, "preset": preset})
+                     self.settings.set("watch_folders", current)
+                     self.save_settings()
+                     self.show_watch_folder_page()
+
+    def show_cluster_page(self):
+        """Lazy create Cluster Info page."""
+        if not hasattr(self, 'node_list'):
+            self.cluster_page = QWidget()
+            layout = QVBoxLayout(self.cluster_page)
+            
+            title = QLabel("🖥 集群節點狀態 (Cluster Nodes)")
+            title.setStyleSheet("font-size: 20px; font-weight: bold; color: #BB86FC;")
+            layout.addWidget(title)
+            
+            self.node_list = QListWidget()
+            layout.addWidget(self.node_list)
+            
+            lbl_info = QLabel(f"本機辨識碼 (Local Node): {self.cluster_mgr.node_id}")
+            layout.addWidget(lbl_info)
+            
+            self.stack.addWidget(self.cluster_page)
+            
+        self.node_list.clear()
+        for nid, data in self.cluster_mgr._known_nodes.items():
+            self.node_list.addItem(f"{nid} - {data.get('status')} (IP: {data.get('ip')})")
+            
+        self.stack.setCurrentWidget(self.cluster_page)
+
     def update_task_progress(self, widget, percent, text):
         try:
             if not widget or getattr(widget, 'stopped', False): return # Block updates if stopped
@@ -2606,6 +2809,19 @@ class ModernTranscoderUI(QMainWindow):
                        widget.lbl_status.setStyleSheet("color: #ff5252;")
                    print(f"Transcode Failed: {msg}")
                    
+                   # [NEW] Intelligent Auto-Retry for Automated Tasks (WatchFolder/Node)
+                   source_type = task.get("source_type", "Manual")
+                   if source_type != "Manual" and "Cancelled" not in msg:
+                       retries = task.get("retry_count", 0)
+                       if retries < 2:
+                           task["retry_count"] = retries + 1
+                           debug_log(f"Auto-Retry Task: {task.get('base_name')} (Attempt {retries+1}) triggered by {source_type}")
+                           if widget:
+                               widget.lbl_status.setText(f"Retrying ({retries+1})")
+                               widget.lbl_status.setStyleSheet("color: #ffa726;")
+                           QTimer.singleShot(3000, lambda: self.start_transcode_task(task, single_run))
+                           return
+
                    suggestion, fix_params = self.analyze_error_suggestion(msg)
                     
                    if "Task Cancelled" not in msg:
@@ -2853,6 +3069,9 @@ class ModernTranscoderUI(QMainWindow):
              item = QListWidgetItem(self.task_list)
              item.setSizeHint(QSize(0, 36))
              widget = TaskProgressWidget(final_base)
+             # Restore source and worker for saved tasks
+             task_data["source_type"] = task_data.get("source_type", "Manual")
+             task_data["worker_id"] = task_data.get("worker_id", "-")
              widget.set_task_data(task_data) 
              widget.lbl_status.setText("Pending")
              widget.removed.connect(self.remove_task_by_widget)
@@ -2870,53 +3089,107 @@ class ModernTranscoderUI(QMainWindow):
              self.btn_start_all.setEnabled(True)
 
     def check_dongle_status(self):
-        """Check if dongle is still connected, warn with countdown and close if removed."""
-        try:
+        """Asynchronously check lock status to prevent stuttering."""
+        if hasattr(self, '_dongle_checking') and self._dongle_checking:
+            return
+            
+        self._dongle_checking = True
+        self.dongle_thread = DongleCheckThread()
+        self.dongle_thread.result_ready.connect(self.on_dongle_check_result)
+        self.dongle_thread.finished.connect(lambda: setattr(self, '_dongle_checking', False))
+        self.dongle_thread.start()
+
+    def on_dongle_check_result(self, allowed, msg, ids):
+        """Handle async dongle check result."""
+        if not allowed:
+            # Stop main monitor timer
+            self.dongle_monitor_timer.stop()
+            
+            # Show special alert dialog with countdown
+            from ui.startup_dialog import StartupCheckDialog
+            alert_dlg = StartupCheckDialog(self)
+            
+            # Countdown timer for the dialog
+            self._countdown = 60
+            
             from core.security import LicenseManager
             lm = LicenseManager()
-            allowed, msg, _ = lm.check_protection()
-            
-            if not allowed:
-                # Stop main monitor timer
-                self.dongle_monitor_timer.stop()
-                
-                # Show special alert dialog with countdown
-                from ui.startup_dialog import StartupCheckDialog
-                alert_dlg = StartupCheckDialog(self)
-                
-                # Countdown timer for the dialog
-                self._countdown = 60
-                
-                def update_countdown():
-                    self._countdown -= 1
-                    alert_dlg.set_dongle_removed(self._countdown)
-                    
-                    # Re-check if dongle is inserted
-                    is_back, _, _ = lm.check_protection()
-                    if is_back:
-                        timer.stop()
-                        alert_dlg.accept()
-                        self.dongle_monitor_timer.start(2000) # Resume monitoring
-                    
-                    if self._countdown <= 0:
-                        timer.stop()
-                        QApplication.quit()
 
-                timer = QTimer(alert_dlg)
-                timer.timeout.connect(update_countdown)
-                timer.start(1000)
-                
+            def update_countdown():
+                self._countdown -= 1
                 alert_dlg.set_dongle_removed(self._countdown)
-                alert_dlg.exec()
                 
-                # If we exit the dialog (via Exit button), quit app
-                if not lm.check_protection()[0]:
+                # Re-check if dongle is inserted
+                is_back, _, _ = lm.check_protection()
+                if is_back:
+                    timer.stop()
+                    alert_dlg.accept()
+                    self.dongle_monitor_timer.start(10000) # Resume monitoring
+                
+                if self._countdown <= 0:
+                    timer.stop()
                     QApplication.quit()
 
-        except Exception as e:
-            debug_log(f"Dongle check error: {e}")
-            # If there's an error during check (e.g. driver fail), treat as removal for safety
-            QApplication.quit()
+            timer = QTimer(alert_dlg)
+            timer.timeout.connect(update_countdown)
+            timer.start(1000)
+            
+            alert_dlg.set_dongle_removed(self._countdown)
+            alert_dlg.exec()
+            
+            # If we exit the dialog (via Exit button), quit app
+            if not lm.check_protection()[0]:
+                QApplication.quit()
+
+    def on_watch_folder_detected(self, file_path, folder_name):
+        """Handler for automated folder monitoring detections."""
+        print(f"WatchFolder Trigger: {file_path} from {folder_name}")
+        
+        # Find preset for this folder
+        watch_folders = self.settings.get("watch_folders", [])
+        preset_name = None
+        for wf in watch_folders:
+            if wf.get("name") == folder_name:
+                preset_name = wf.get("preset")
+                break
+        
+        # Add to queue automatically
+        self.add_task_to_queue(
+            source_path=file_path, 
+            full_duration=True, 
+            source_type=folder_name, 
+            worker_id="AUTO", 
+            preset_name=preset_name
+        )
+        
+        # Start immediately if no other task is running? 
+        # For now, let user press "Start All" or just pend it.
+        # Requirement says "啟動轉碼" (Launch Transcode)
+        QTimer.singleShot(500, self.start_transcode_all)
+
+    def on_cluster_task_synced(self, task_data):
+        """Handler for tasks broadcasted by other nodes."""
+        # Prevent duplicates
+        for t in self.pending_tasks:
+            if t.get("base_name") == task_data.get("base_name") and t.get("node_origin") == task_data.get("node_origin"):
+                return
+        
+        print(f"Cluster: New Task from {task_data.get('node_origin')}")
+        self.add_task_to_queue(
+            source_path=task_data.get("source"),
+            full_duration=True,
+            source_type=f"Node:{task_data.get('node_origin')}",
+            worker_id="Cluster"
+        )
+
+    def on_cluster_node_updated(self, node_data):
+        """Update cluster node status in the Dashboard (e.g. status bar)."""
+        node_id = node_data.get("node_id")
+        status = node_data.get("status")
+        # For now, just a debug log, could be a list in a side panel later
+        print(f"Cluster Node Update: {node_id} is {status}")
+        if hasattr(self, 'statusBar'):
+            self.statusBar().showMessage(f"Cluster: node {node_id} is {status}", 3000)
 
     def closeEvent(self, event):
         """Standardized clean shutdown to prevent QThread crashes on exit."""

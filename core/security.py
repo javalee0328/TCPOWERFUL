@@ -94,44 +94,48 @@ class LicenseManager:
 
     def check_protection(self):
         """
-        Main entry point for the app.
-        Scans all USBs for a valid license.
-        Returns (is_allowed, status_msg, hardware_ids_checked)
+        Unified Security Check: Supports both SafeNet Sentinel Dongles 
+        and USB Removable Drives with license.dat.
         """
-        drives = self.get_removable_drives()
         checked_ids = []
+        
+        # 1. Check Sentinel / SafeNet Keys (Hardware Only)
+        sentinels = self.get_sentinel_devices()
+        if sentinels:
+             for instance_id, friendly_name in sentinels:
+                 checked_ids.append(f"Dongle: {friendly_name} ({instance_id})")
+             return True, "SafeNet Dongle Detected (Access Granted)", checked_ids
 
-        if not drives:
-            return False, "No USB Dongle Detected", []
-
+        # 2. Check Removable Drives (License File)
+        drives = self.get_removable_drives()
         for drive in drives:
             serial = self.get_volume_serial(drive)
             if not serial: continue
             
-            checked_ids.append(f"{drive} ({serial})")
+            checked_ids.append(f"USB: {drive} ({serial})")
             license_path = os.path.join(drive, "license.dat")
             
             is_valid, msg, meta = self.verify_license_file(license_path, serial)
             if is_valid:
                 return True, f"Welcome {meta.get('client_name', 'User')}", checked_ids
 
+        return False, "未偵測到加密鎖或授權檔案 (No Dongle or License Found)", checked_ids
+
     def get_sentinel_devices(self):
         """Returns a list of connected SafeNet/Sentinel devices (InstanceIDs)."""
         sentinels = []
         try:
             # Powershell command to find SafeNet/Sentinel devices
-            # We look for Manufacturer 'SafeNet' or FriendlyNames containing 'Sentinel'/'HASP'
-            # CRITICAL: Must use -Status OK to only find currently connected devices
             cmd = [
                 "powershell", "-NoProfile", "-Command",
                 "Get-PnpDevice -Status OK | Where-Object { ($_.FriendlyName -match 'Sentinel') -or ($_.FriendlyName -match 'HASP') -or ($_.Manufacturer -match 'SafeNet') } | Select-Object InstanceId, FriendlyName | ConvertTo-Json"
             ]
             
-            # Using Popen to capture output
             startupinfo = None
             if os.name == 'nt':
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
                 
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, startupinfo=startupinfo)
             out, err = p.communicate()
@@ -139,10 +143,8 @@ class LicenseManager:
             if out.strip():
                 try:
                     data = json.loads(out)
-                    # ConvertTo-Json returns dict if single item, list if multiple
                     if isinstance(data, dict): data = [data]
                     for item in data:
-                        # Clean ID: USB\VID_0529&PID_0001\5&22... -> Use the whole InstanceId as unique HWID for binding
                         sentinels.append((item.get("InstanceId"), item.get("FriendlyName")))
                 except:
                     pass
@@ -150,28 +152,6 @@ class LicenseManager:
             print(f"Sentinel Scan Error: {e}")
             
         return sentinels
-
-    def check_protection(self):
-        """
-        Main entry point for the app.
-        STRICT MODE: Scans ONLY Sentinel / SafeNet Keys.
-        RELIES ON HARDWARE PRESENCE ONLY (No license.dat required).
-        Returns (is_allowed, status_msg, hardware_ids_checked)
-        """
-        checked_ids = []
-        
-        # 2. Check Sentinel / SafeNet Keys (Dongle Mode)
-        # Scan for connected dongles
-        sentinels = self.get_sentinel_devices()
-        
-        if sentinels:
-             # If ANY SafeNet device is found, allow access.
-             for instance_id, friendly_name in sentinels:
-                 checked_ids.append(f"Dongle: {friendly_name} ({instance_id})")
-             
-             return True, "SafeNet Dongle Detected (Access Granted)", checked_ids
-        else:
-             return False, "未偵測到 SafeNet 加密鎖 (No SafeNet Dongle Found)", []
 
 if __name__ == "__main__":
     # Test Run

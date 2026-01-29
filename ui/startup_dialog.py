@@ -17,10 +17,11 @@ class StartupCheckDialog(QDialog):
         self.setAttribute(Qt.WA_TranslucentBackground)
         
         # Set window icon
-        base_path = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.abspath(".")
+        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        base_path = sys._MEIPASS if hasattr(sys, '_MEIPASS') else script_dir
+        
         icon_path = os.path.join(base_path, "assets", "icon.ico")
         if os.path.exists(icon_path):
-            from PySide6.QtGui import QIcon
             self.setWindowIcon(QIcon(icon_path))
         
         # Main container with glassmorphism effect
@@ -88,14 +89,19 @@ class StartupCheckDialog(QDialog):
         """)
         layout.addWidget(self.lbl_stage)
         
-        # Status message - Bolder
+        # Status message - Bolder with Golden Background
         self.lbl_status = QLabel()
         self.lbl_status.setAlignment(Qt.AlignCenter)
         self.lbl_status.setStyleSheet("""
-            font-size: 12px; 
-            color: #DDDDDD;
+            font-size: 13px; 
+            color: #000000;
+            background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FFD700, stop:1 #FFA500);
+            border: 2px solid #B8860B;
+            border-radius: 8px;
             font-family: 'Microsoft YaHei UI', 'Segoe UI', sans-serif;
-            font-weight: 500;
+            font-weight: 700;
+            padding: 12px;
+            margin: 5px;
             line-height: 1.5;
             letter-spacing: 0.4px;
         """)
