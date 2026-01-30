@@ -22,6 +22,8 @@ def get_video_metadata(file_path):
         cmd = [
             "ffprobe", 
             "-v", "quiet", 
+            "-analyzeduration", "100000000", # 100M
+            "-probesize", "100000000",      # 100M
             "-print_format", "json", 
             "-show_format", 
             "-show_streams", 

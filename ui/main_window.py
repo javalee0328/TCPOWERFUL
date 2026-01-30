@@ -8,7 +8,8 @@ from PySide6.QtWidgets import (
     QFrame, QSplitter, QCheckBox, QLineEdit, QSpinBox, QListWidgetItem,
     QAbstractItemView, QGridLayout, QStackedLayout, QComboBox, QDoubleSpinBox,
     QInputDialog, QMessageBox, QProgressDialog, QMenu, QWidgetAction,
-    QToolButton, QStyle, QAbstractSpinBox, QDialog, QTextEdit
+    QToolButton, QStyle, QAbstractSpinBox, QDialog, QTextEdit, QSlider,
+    QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PySide6.QtCore import Qt, QSize, QProcess, QTimer, QDir, QEvent, Signal, QRectF, QThread, QTime
 from PySide6.QtGui import QIcon, QAction, QKeySequence, QShortcut, QPixmap, QPainter, QPainterPath, QPen, QColor, QKeyEvent, QBrush, QPalette
@@ -159,7 +160,8 @@ class SmartFailureDialog(QDialog):
     def __init__(self, technical_log, user_suggestion, fix_params=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("智能轉碼診斷 (Smart Diagnosis)")
-        self.resize(550, 420)
+        self.setMinimumSize(600, 450) # Resizable and larger minimum
+        self.setSizeGripEnabled(True)
         self.setStyleSheet("background-color: #1e1e1e; color: #e0e0e0;")
         self.fix_params = fix_params
         self.apply_fix = False
@@ -188,10 +190,11 @@ class SmartFailureDialog(QDialog):
         self.txt_details = QTextEdit()
         self.txt_details.setPlainText(technical_log)
         self.txt_details.setReadOnly(True)
-        self.txt_details.setFixedHeight(120)
+        self.txt_details.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.txt_details.setMinimumHeight(150)
         self.txt_details.setStyleSheet("background: #000; color: #aaa; font-family: 'Consolas'; font-size: 11px; border: 1px solid #333;")
         self.txt_details.hide()
-        layout.addWidget(self.txt_details)
+        layout.addWidget(self.txt_details, 1) # Give it stretch factor
 
         self.details_btn.clicked.connect(lambda: self.txt_details.setVisible(self.details_btn.isChecked()))
 
@@ -223,105 +226,367 @@ class SmartFailureDialog(QDialog):
         self.apply_fix = True
         self.accept()
 
+
+# [NEW] Custom Widget for Watch Folder List
+
+class PresetSelectorDialog(QDialog):
+    def __init__(self, parent=None, initial_selection=None):
+        super().__init__(parent)
+        self.setWindowTitle("選擇監控轉碼目標格式")
+        self.setMinimumSize(450, 600)
+        self.selected_preset = None
+        
+        layout = QVBoxLayout(self)
+        
+        title = QLabel("請選擇該資料夾對應的格式:")
+        title.setStyleSheet("font-weight: bold; font-size: 14px; margin-bottom: 5px;")
+        layout.addWidget(title)
+        
+        self.list_widget = QListWidget()
+        self.list_widget.setStyleSheet("""
+            QListWidget { background-color: #f5f5f5; color: #333; font-size: 13px; border: 1px solid #ccc; }
+            QListWidget::item { padding: 10px; border-bottom: 1px solid #eee; }
+            QListWidget::item:selected { background-color: #0078d4; color: white; }
+        """)
+        
+        # Load Presets
+        from core.preset_data import PRESETS
+        preset_names = sorted(PRESETS.keys())
+        for name in preset_names:
+            item = QListWidgetItem(name)
+            self.list_widget.addItem(item)
+            if initial_selection == name:
+                self.list_widget.setCurrentItem(item)
+                
+        layout.addWidget(self.list_widget)
+        
+        # Search Box
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("快速搜尋格式...")
+        self.search_edit.textChanged.connect(self.filter_list)
+        layout.addWidget(self.search_edit)
+        
+        btn_layout = QHBoxLayout()
+        btn_ok = QPushButton("確認選擇 (OK)")
+        btn_ok.setMinimumHeight(40)
+        btn_ok.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold;")
+        btn_ok.clicked.connect(self.accept)
+        
+        btn_cancel = QPushButton("取消 (Cancel)")
+        btn_cancel.setMinimumHeight(40)
+        btn_cancel.clicked.connect(self.reject)
+        
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+        
+        self.list_widget.itemDoubleClicked.connect(lambda: self.accept())
+
+    def filter_list(self, text):
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            item.setHidden(text.lower() not in item.text().lower())
+
+    def get_selection(self):
+        curr = self.list_widget.currentItem()
+        return curr.text() if curr else None
+
+class WatchFolderRowWidget(QWidget):
+    def __init__(self, folder_data, index, parent_controller):
+        super().__init__()
+        self.folder_data = folder_data
+        self.index = index
+        self.controller = parent_controller
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(15, 10, 15, 10)
+        self.setFixedHeight(80) # Explicit height to prevent clipping
+        
+        # Info Column
+        info_layout = QVBoxLayout()
+        name_lbl = QLabel(f"📁 {folder_data.get('name')}")
+        name_lbl.setStyleSheet("font-weight: bold; color: #E0E0E0; font-size: 14px;")
+        path_lbl = QLabel(f"{folder_data.get('path')}")
+        path_lbl.setStyleSheet("color: #888; font-size: 11px;")
+        preset_lbl = QLabel(f"Preset: {folder_data.get('preset')}")
+        preset_lbl.setStyleSheet("color: #4CAF50; font-size: 11px;")
+        
+        info_layout.addWidget(name_lbl)
+        info_layout.addWidget(path_lbl)
+        info_layout.addWidget(preset_lbl)
+        layout.addLayout(info_layout, stretch=1)
+        
+        # Status & Control
+        self.is_enabled = folder_data.get("enabled", True)
+        
+        status_text = "監控中 (Active)" if self.is_enabled else "已停止 (Stopped)"
+        status_color = "#4CAF50" if self.is_enabled else "#757575"
+        self.lbl_status = QLabel(status_text)
+        self.lbl_status.setStyleSheet(f"color: {status_color}; font-weight: bold; font-size: 12px; margin-right: 15px;")
+        layout.addWidget(self.lbl_status)
+        
+        self.btn_toggle = QToolButton()
+        self.btn_toggle.setFixedSize(42, 42) # Slightly larger button
+        self.btn_toggle.setCursor(Qt.PointingHandCursor)
+        
+        if self.is_enabled:
+            self.btn_toggle.setIcon(self.controller.create_geometric_icon("stop", "#ffffff", size=32))
+            self.btn_toggle.setToolTip("停止監控 (Stop)")
+            self.btn_toggle.setStyleSheet("QToolButton { background-color: #c62828; border: none; border-radius: 8px; } QToolButton:hover { background-color: #d32f2f; }")
+        else:
+            self.btn_toggle.setIcon(self.controller.create_geometric_icon("play", "#ffffff", size=32))
+            self.btn_toggle.setToolTip("啟動監控 (Start)")
+            self.btn_toggle.setStyleSheet("QToolButton { background-color: #2e7d32; border: none; border-radius: 8px; } QToolButton:hover { background-color: #388e3c; }")
+        
+        self.btn_toggle.setIconSize(QSize(28, 28)) # Calibrated icon size
+        self.btn_toggle.clicked.connect(self.on_toggle_clicked)
+        layout.addWidget(self.btn_toggle)
+        
+        # [NEW] Edit Button
+        self.btn_edit = QToolButton()
+        self.btn_edit.setFixedSize(42, 42)
+        self.btn_edit.setCursor(Qt.PointingHandCursor)
+        self.btn_edit.setIcon(self.controller.create_geometric_icon("edit", "#ffffff", size=32))
+        self.btn_edit.setIconSize(QSize(28, 28))
+        self.btn_edit.setToolTip("編輯設定 (Edit)")
+        self.btn_edit.setStyleSheet("QToolButton { background-color: #1976D2; border: none; border-radius: 8px; } QToolButton:hover { background-color: #2196F3; }")
+        self.btn_edit.clicked.connect(lambda: self.controller.add_watch_folder_ui(edit_index=self.index))
+        layout.addWidget(self.btn_edit)
+        
+        # [NEW] Delete Button
+        self.btn_del = QToolButton()
+        self.btn_del.setFixedSize(42, 42)
+        self.btn_del.setCursor(Qt.PointingHandCursor)
+        self.btn_del.setIcon(self.controller.create_geometric_icon("delete", "#ffffff", size=32))
+        self.btn_del.setIconSize(QSize(28, 28))
+        self.btn_del.setToolTip("刪除監控 (Delete)")
+        self.btn_del.setStyleSheet("QToolButton { background-color: #424242; border: none; border-radius: 8px; } QToolButton:hover { background-color: #ff5252; }")
+        self.btn_del.clicked.connect(lambda: self.controller.delete_watch_folder(self.index))
+        layout.addWidget(self.btn_del)
+
+    def on_toggle_clicked(self):
+        new_state = not self.is_enabled
+        self.controller.toggle_watch_folder(self.index, new_state)
+
+class ClusterNodeRowWidget(QWidget):
+    def __init__(self, node_id, data, is_local=False):
+        super().__init__()
+        self.node_id = node_id # Store for updates
+        self.setFixedHeight(85)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setSpacing(15)
+        
+        # Background Style
+        bg_color = "#353535" if is_local else "#2b2b2b"
+        border_color = "#BB86FC" if is_local else "#444"
+        self.setObjectName("NodeRow")
+        self.setStyleSheet(f"""
+            QWidget#NodeRow {{
+                background-color: {bg_color};
+                border: 1px solid {border_color};
+                border-radius: 6px;
+            }}
+            QLabel {{ color: #e0e0e0; font-family: 'Segoe UI', sans-serif; }}
+        """)
+        
+        # Icon
+        lbl_icon = QLabel()
+        lbl_icon.setFixedSize(48, 48)
+        lbl_icon.setAlignment(Qt.AlignCenter)
+        lbl_icon.setText("🖥️")
+        lbl_icon.setStyleSheet("font-size: 24px; background-color: #444; border-radius: 6px;")
+        layout.addWidget(lbl_icon)
+        
+        # Info Column
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(2)
+        
+        # ID & Role
+        role_map = {"Master": "主監控節點", "Worker": "工作節點"}
+        role_str = role_map.get(data.get("role"), data.get("role", "Node"))
+        lbl_title = QLabel(f"{node_id}  ({role_str})")
+        lbl_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #ffffff;")
+        info_layout.addWidget(lbl_title)
+        
+        # IP & Status
+        status = data.get("status", "Unknown")
+        status_color = "#4CAF50" if status == "Online" or status == "Online (Local)" else "#F44336"
+        self.lbl_meta = QLabel(f"<span style='color:{status_color}'>● {status}</span>  |  IP: {data.get('ip', '-')}")
+        self.lbl_meta.setStyleSheet("font-size: 11px; color: #aaa;")
+        info_layout.addWidget(self.lbl_meta)
+        
+        # Activity
+        activity = data.get("current_activity", "Idle")
+        activity_color = "#BB86FC" if activity != "Idle" else "#777"
+        self.lbl_activity = QLabel(f"Activity: {activity}")
+        self.lbl_activity.setStyleSheet(f"font-size: 11px; color: {activity_color}; font-style: italic;")
+        info_layout.addWidget(self.lbl_activity)
+        
+        layout.addLayout(info_layout, 1) # Expand Info
+        
+        # Resources Column
+        res_layout = QVBoxLayout()
+        res_layout.setSpacing(4)
+        
+        # CPU Bar
+        cpu_layout = QHBoxLayout()
+        lbl_cpu = QLabel("CPU")
+        lbl_cpu.setFixedWidth(30)
+        self.bar_cpu = QProgressBar()
+        self.bar_cpu.setRange(0, 100)
+        self.bar_cpu.setValue(int(data.get("cpu_usage", 0)))
+        self.bar_cpu.setFixedHeight(8)
+        self.bar_cpu.setTextVisible(False)
+        self.bar_cpu.setStyleSheet(self._get_bar_style("#03A9F4"))
+        cpu_layout.addWidget(lbl_cpu)
+        cpu_layout.addWidget(self.bar_cpu)
+        res_layout.addLayout(cpu_layout)
+        
+        # RAM Bar
+        ram_layout = QHBoxLayout()
+        lbl_ram = QLabel("RAM")
+        lbl_ram.setFixedWidth(30)
+        self.bar_ram = QProgressBar()
+        self.bar_ram.setRange(0, 100)
+        self.bar_ram.setValue(int(data.get("ram_usage", 0)))
+        self.bar_ram.setFixedHeight(8)
+        self.bar_ram.setTextVisible(False)
+        self.bar_ram.setStyleSheet(self._get_bar_style("#E91E63"))
+        ram_layout.addWidget(lbl_ram)
+        ram_layout.addWidget(self.bar_ram)
+        res_layout.addLayout(ram_layout)
+        
+        layout.addLayout(res_layout)
+        layout.addSpacing(10)
+        
+    def _get_bar_style(self, color):
+        return f"""
+            QProgressBar {{
+                background-color: #222;
+                border: 1px solid #444;
+                border-radius: 4px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {color};
+                border-radius: 3px;
+            }}
+        """
+
+    def update_state(self, data):
+        """Update live metrics without rebuilding widget."""
+        # Update Status/IP
+        status = data.get("status", "Unknown")
+        status_color = "#4CAF50" if status == "Online" or status == "Online (Local)" else "#F44336"
+        self.lbl_meta.setText(f"<span style='color:{status_color}'>● {status}</span>  |  IP: {data.get('ip', '-')}")
+        
+        # Update Activity
+        activity = data.get("current_activity", "Idle")
+        activity_color = "#BB86FC" if activity != "Idle" else "#777"
+        self.lbl_activity.setText(f"Activity: {activity}")
+        self.lbl_activity.setStyleSheet(f"font-size: 11px; color: {activity_color}; font-style: italic;")
+        
+        # Update Resources
+        self.bar_cpu.setValue(int(data.get("cpu_usage", 0)))
+        self.bar_ram.setValue(int(data.get("ram_usage", 0)))
+
 class TaskProgressWidget(QWidget):
     removed = Signal(object)
     transcode_requested = Signal(object) 
     pause_requested = Signal(object)
     resume_requested = Signal(object)
     stop_requested = Signal(object)
+    switch_page_requested = Signal() # [NEW] Switch to Player Page
 
     def __init__(self, filename, parent=None):
         super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(5, 0, 5, 0) # Zero vertical margin for compactness
+        # Use GridLayout for strict column alignment matching DB Header
+        layout = QGridLayout(self)
+        layout.setContentsMargins(5, 2, 5, 2)
         layout.setSpacing(10)
 
-        # 1. Name
+        # Header Definition:
+        # Name(240) | Status(140) | Fmt(260) | Time(220) | Perf(140) 
+        # Src(120)  | Node(60)    | Prog(100)| Fin(140)  | Target(200)
+
+        # 1. Task Name
         self.lbl_name = QLabel(filename)
         self.lbl_name.setFixedWidth(240)
-        self.lbl_name.setStyleSheet("color: #ffffff; font-weight: bold; font-size: 16px;") # Pure White
+        self.lbl_name.setStyleSheet("font-weight: bold; color: white; font-size: 13px;")
         self.lbl_name.setToolTip(filename)
-        layout.addWidget(self.lbl_name)
-
+        layout.addWidget(self.lbl_name, 0, 0)
+        
         # 2. Status
         self.lbl_status = QLabel("Pending")
-        self.lbl_status.setFixedWidth(140)
-        self.lbl_status.setStyleSheet("color: #ffffff; font-size: 14px;") # Changed to White
-        layout.addWidget(self.lbl_status)
+        self.lbl_status.setFixedWidth(100)
+        self.lbl_status.setStyleSheet("color: #ffa726; font-weight: bold;")
+        layout.addWidget(self.lbl_status, 0, 1)
 
         # 3. Format Info
-        self.lbl_fmt_info = QLabel("-")
-        self.lbl_fmt_info.setFixedWidth(260)
-        self.lbl_fmt_info.setStyleSheet("color: #ffffff; font-size: 14px;") # Changed to White
-        layout.addWidget(self.lbl_fmt_info)
+        self.lbl_info = QLabel("-")
+        self.lbl_info.setFixedWidth(240)
+        self.lbl_info.setStyleSheet("color: #ccc; font-size: 11px;")
+        self.lbl_info.setWordWrap(True)
+        layout.addWidget(self.lbl_info, 0, 2)
 
-        # 4. Time Range (In/Out)
-        # 4. Time Range (Start - End)
-        self.lbl_time_range = QLabel("-")
-        self.lbl_time_range.setFixedWidth(220) # Widened to prevent truncation
-        self.lbl_time_range.setStyleSheet("color: #ffffff; font-size: 14px;")
-        layout.addWidget(self.lbl_time_range)
+        # 4. Time Range
+        self.lbl_time_range = QLabel("-") 
+        self.lbl_time_range.setFixedWidth(200)
+        self.lbl_time_range.setStyleSheet("color: #ccc; font-size: 11px;")
+        layout.addWidget(self.lbl_time_range, 0, 3)
 
         # 5. Performance
-        self.lbl_perf = QLabel("")
-        self.lbl_perf.setFixedWidth(140)
-        self.lbl_perf.setStyleSheet("color: #ffffff; font-size: 14px;") # Changed to White
-        layout.addWidget(self.lbl_perf)
+        self.lbl_perf = QLabel("-")
+        self.lbl_perf.setFixedWidth(100)
+        self.lbl_perf.setStyleSheet("color: #ffd54f; font-weight: bold;")
+        layout.addWidget(self.lbl_perf, 0, 4)
 
-        # [NEW] 6. Source & Worker
-        self.lbl_source = QLabel("Manual")
-        self.lbl_source.setFixedWidth(120)
-        self.lbl_source.setStyleSheet("color: #90caf9; font-size: 13px;") 
-        layout.addWidget(self.lbl_source)
+        # 6. Source Type
+        self.lbl_source_tag = QLabel("MANUAL")
+        self.lbl_source_tag.setFixedWidth(100)
+        self.lbl_source_tag.setStyleSheet("color: #b0bec5; font-size: 10px; border: 1px solid #546e7a; border-radius: 3px; padding: 2px;")
+        layout.addWidget(self.lbl_source_tag, 0, 5)
+        
+        # 7. Node ID
+        self.lbl_node = QLabel("-")
+        self.lbl_node.setFixedWidth(60)
+        self.lbl_node.setStyleSheet("color: #81d4fa; font-size: 11px;")
+        layout.addWidget(self.lbl_node, 0, 6)
 
-        self.lbl_worker = QLabel("-")
-        self.lbl_worker.setFixedWidth(60)
-        self.lbl_worker.setStyleSheet("color: #ce93d8; font-size: 13px;")
-        layout.addWidget(self.lbl_worker)
-
-        # 7. Progress
+        # 8. Progress Bar
         self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setFixedHeight(8) # Slightly thicker
-        self.progress.setTextVisible(False) # HIDE TEXT INSIDE BAR
-        layout.addWidget(self.progress, 1) # Expand progress to fill space
+        self.progress.setFixedWidth(150) # [REDUCED] per user feedback
+        self.progress.setTextVisible(True)
+        # Note: Progress bar internal text can remain centered for readability
+        self.progress.setStyleSheet("""
+            QProgressBar {
+                background-color: #333; border: none; border-radius: 4px; height: 14px;
+                text-align: center; color: white; font-size: 10px; font-weight: bold;
+            }
+            QProgressBar::chunk { background-color: #2e7d32; border-radius: 4px; }
+        """) # [NEW] Changed to Green for consistency with user screenshot
+        layout.addWidget(self.progress, 0, 7)
 
-        # 8. Percent Label (Next to Progress Bar)
-        self.lbl_percent = QLabel("")
-        self.lbl_percent.setFixedWidth(60)
-        self.lbl_percent.setStyleSheet("color: #ffffff; font-weight: bold; font-size: 13px;") # Changed to White
-        self.lbl_percent.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.lbl_percent)
+        # 9. Buttons (Use HBox)
+        btns_container = QWidget()
+        btns_container.setFixedWidth(140) # Ensure buttons have space
+        btns_layout = QHBoxLayout(btns_container)
+        btns_layout.setContentsMargins(0, 0, 0, 0)
+        btns_layout.setSpacing(5)
 
-        # 9. Finish Time
-        self.lbl_finish = QLabel("-")
-        self.lbl_finish.setFixedWidth(140)
-        self.lbl_finish.setStyleSheet("color: #81c784; font-size: 13px;")
-        layout.addWidget(self.lbl_finish)
-
-        # 10. Target Path (New)
-        self.lbl_target = QLabel("-")
-        self.lbl_target.setFixedWidth(200)
-        self.lbl_target.setStyleSheet("color: #ffa726; font-size: 12px;")
-        self.lbl_target.setToolTip("-")
-        layout.addWidget(self.lbl_target)
-
-        # 9. Buttons
         self.btn_transcode = QToolButton()
         self.btn_transcode.setFixedSize(30, 30)
-        self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24)) # Revert to Refresh (Original)
-        self.btn_transcode.setToolTip("當前任務轉碼 (Start Transcode)") # Requested Tooltip
+        self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24))
+        self.btn_transcode.setToolTip("當前任務轉碼 (Start Transcode)")
         self.btn_transcode.setStyleSheet(self.get_btn_style("transparent"))
         self.btn_transcode.clicked.connect(self.toggle_transcode)
-        layout.addWidget(self.btn_transcode)
+        btns_layout.addWidget(self.btn_transcode)
         
         self.btn_play_result = QToolButton()
         self.btn_play_result.setFixedSize(30, 30)
-        self.btn_play_result.setIcon(self.create_geometric_icon("play", "#ffffff", size=20)) # White Arrow
+        self.btn_play_result.setIcon(self.create_geometric_icon("play", "#ffffff", size=20))
         self.btn_play_result.setToolTip("播放/刷新結果 (Play/Refresh - F5)")
         self.btn_play_result.hide()
-        # [NEW] Green Background Stylesheet
         self.play_style_active = """
             QToolButton { background-color: #2e7d32; border: 1px solid #388e3c; border-radius: 4px; }
             QToolButton:hover { background-color: #388e3c; }
@@ -329,7 +594,7 @@ class TaskProgressWidget(QWidget):
         """
         self.btn_play_result.setStyleSheet(self.play_style_active)
         self.btn_play_result.clicked.connect(self.play_or_refresh)
-        layout.addWidget(self.btn_play_result)
+        btns_layout.addWidget(self.btn_play_result)
 
         self.btn_open_folder = QToolButton()
         self.btn_open_folder.setFixedSize(30, 30)
@@ -339,27 +604,28 @@ class TaskProgressWidget(QWidget):
         self.btn_open_folder.hide()
         self.btn_open_folder.setStyleSheet(self.get_btn_style("transparent"))
         self.btn_open_folder.clicked.connect(self.open_folder)
-        layout.addWidget(self.btn_open_folder)
+        btns_layout.addWidget(self.btn_open_folder)
 
-        # Cancel/Remove
-        # Cancel/Stop
         self.btn_cancel = QToolButton()
         self.btn_cancel.setFixedSize(30, 30)
         self.btn_cancel.setIcon(self.create_geometric_icon("close", "#ffffff", size=24)) 
         self.btn_cancel.setToolTip("移除任務 (Remove)")
         self.btn_cancel.setStyleSheet(self.get_btn_style("filled_close")) 
         self.btn_cancel.clicked.connect(self.request_stop_or_remove)
-        layout.addWidget(self.btn_cancel)
+        btns_layout.addWidget(self.btn_cancel)
+        
+        layout.addWidget(btns_container, 0, 8) # Column 8 is Buttons now
 
         self.output_path = ""
-        self.workers = {} # Key: widget, Value: TranscodeWorker
+        self.workers = {}
         self.current_process = None 
-        self.player_ref = None # [NEW] Placeholder for main player reference
+        self.player_ref = None
         self.task_data = None
         self.start_time = None
         self.end_time = None
-        self.last_seen_percent = 0 # Track play progress
-        self.stopped = False # Flag to block updates after stop
+        self.last_seen_percent = 0
+        self.stopped = False
+        self.last_error_log = "" # [NEW] Store last error for diagnosis
 
     def set_done(self, out_path, player, speed_text):
         """Called upon successful transcode completion"""
@@ -370,21 +636,36 @@ class TaskProgressWidget(QWidget):
         # UI Updates
         self.lbl_status.setText("Done")
         self.lbl_perf.setText(speed_text)
-        self.lbl_percent.setText("100%")
+        self.progress.setFormat("100%")
+        self.progress.setValue(100)
         
-        # Display full time range: Start - End
+        # Display full time range
         end_time = QTime.currentTime().toString("HH:mm:ss")
         start_t_str = self.start_time.toString("HH:mm:ss") if hasattr(self, 'start_time') and self.start_time else "--:--:--"
         self.lbl_time_range.setText(f"{start_t_str} - {end_time}")
         
-        # Icon/Buttons
-        self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24))
-        self.btn_transcode.setToolTip("重新轉碼 (Re-Transcode)")
+        # Icon/Buttons - SWAPPED per User Request
+        # Main Button -> Play
+        self.btn_transcode.setIcon(self.create_geometric_icon("play", "#4caf50", size=24)) # Green Play 
+        self.btn_transcode.setToolTip("播放結果 (Play Result)")
+        # Disconnect old transcode slot and connect play
+        try: self.btn_transcode.clicked.disconnect() 
+        except: pass
+        self.btn_transcode.clicked.connect(self.play_or_refresh)
         
+        # Secondary Button -> Re-transcode (Refresh)
         self.btn_play_result.show()
+        self.btn_play_result.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=20))
+        self.btn_play_result.setToolTip("重新轉碼 (Re-Transcode)")
+        self.btn_play_result.setStyleSheet("QToolButton { background-color: #444; border: 1px solid #555; border-radius: 4px; }")
+        # Disconnect play slot and connect transcode
+        try: self.btn_play_result.clicked.disconnect()
+        except: pass
+        self.btn_play_result.clicked.connect(self.toggle_transcode) # This triggers re-transcode logic
+        
         self.btn_open_folder.show()
         
-        # Reset Cancel Button to Close (Remove) style
+        # Reset Cancel Button to Close style
         self.btn_cancel.setFixedSize(30, 30)
         self.btn_cancel.setIconSize(QSize(24, 24))
         self.btn_cancel.setIcon(self.create_geometric_icon("close", "#ffffff", size=24))
@@ -439,7 +720,7 @@ class TaskProgressWidget(QWidget):
         res = task.get('resolution')
         if res: fmt_parts.append(res)
         
-        self.lbl_fmt_info.setText(" / ".join(fmt_parts))
+        self.lbl_info.setText(" / ".join(fmt_parts))
         
         # 2. Time Range (Start - End)
         in_p = task.get("in_point", 0)
@@ -459,21 +740,16 @@ class TaskProgressWidget(QWidget):
 
         # [NEW] Source & Worker Info
         source_type = task.get("source_type", "Manual")
-        self.lbl_source.setText(source_type)
+        self.lbl_source_tag.setText(source_type)
         if source_type != "Manual":
-            self.lbl_source.setStyleSheet("color: #ff9800; font-weight: bold; font-size: 13px;") # Highlight folder tasks
+            self.lbl_source_tag.setStyleSheet("color: #ff9800; font-weight: bold; font-size: 10px; border: 1px solid #ff9800; border-radius: 3px; padding: 2px;") # Highlight folder tasks
         else:
-            self.lbl_source.setStyleSheet("color: #90caf9; font-size: 13px;")
+            self.lbl_source_tag.setStyleSheet("color: #b0bec5; font-size: 10px; border: 1px solid #546e7a; border-radius: 3px; padding: 2px;")
 
         worker_id = task.get("worker_id", "-")
-        self.lbl_worker.setText(worker_id)
+        self.lbl_node.setText(worker_id)
 
-        finish_time = task.get("finish_time", "-")
-        self.lbl_finish.setText(finish_time)
-        
-        target_dir = task.get("output_dir", "-")
-        self.lbl_target.setText(os.path.basename(target_dir))
-        self.lbl_target.setToolTip(target_dir)
+        # Removed Finish Time and Target Label setting per user request
 
         # Highlight Play Button (Actually, User wants ONLY at 100%)
         # So we ensure it is hidden here
@@ -521,7 +797,7 @@ class TaskProgressWidget(QWidget):
         self.btn_transcode.setToolTip("暫停轉碼 (Pause)")
         
         # Change Cancel to Stop Style (Larger Icon)
-        self.btn_cancel.setIconSize(QSize(28, 28)) # Slightly larger icon
+        self.btn_cancel.setIconSize(QSize(28, 28)) 
         self.btn_cancel.setIcon(self.create_geometric_icon("stop", "#ffffff", size=28)) 
         self.btn_cancel.setToolTip("停止轉碼 (Stop)")
         self.btn_cancel.setStyleSheet(self.get_btn_style("filled_close")) 
@@ -531,34 +807,55 @@ class TaskProgressWidget(QWidget):
         
         if state in ['running', 'paused']:
             # Confirm Stop
-            reply = QMessageBox.question(self, "停止轉碼?", "確定要終止目前的轉碼任務嗎？\n(進度將歸零)", 
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if reply == QMessageBox.Yes:
+            box = QMessageBox(self)
+            box.setWindowTitle("停止轉碼?")
+            box.setText("確定要終止目前的轉碼任務嗎？\n(進度將歸零)")
+            btn_stop = box.addButton("停止 (Stop)", QMessageBox.YesRole)
+            btn_force = box.addButton("強制移除 (Force Remove)", QMessageBox.DestructiveRole)
+            btn_cancel = box.addButton("取消 (Cancel)", QMessageBox.RejectRole)
+            
+            box.exec()
+            
+            if box.clickedButton() == btn_stop:
                 self.stop_requested.emit(self)
-                # Reset UI
-                self.state = 'stopped'
-                self.stopped = True # Block future updates
-                self.progress.setValue(0)
-                self.lbl_percent.setText("") 
-                self.lbl_time_range.setText("") 
-                self.lbl_perf.setText("") 
-                self.lbl_status.setText("Stopped")
-                self.lbl_status.setStyleSheet("color: #aaa;")
-                
-                # Reset Size
-                self.btn_cancel.setFixedSize(30, 30)
-                self.btn_cancel.setIconSize(QSize(24, 24)) # Reset to normal
-                self.btn_cancel.setIcon(self.create_geometric_icon("close", "#ffffff", size=24)) 
-                self.btn_cancel.setToolTip("移除任務 (Remove)")
-                self.btn_cancel.setStyleSheet(self.get_btn_style("filled_close"))
-                
-                # Reset Transcode Button to Original (Refresh)
-                self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24))
-                self.btn_transcode.setToolTip("重新轉碼 (Re-Transcode)") # Changed to Re-transcode AFTER stop
-                
-        else:
+                # Reset UI to Cleanable state
+                self.set_stopped_ui()
+            elif box.clickedButton() == btn_force:
+                # Direct Remove Strategy
+                self.removed.emit(self)
+            else:
+                # User said No - Resume if it was active
+                if state == 'paused' or state == 'running':
+                    self.resume_requested.emit(self)
+                    self.state = 'running'
+                    self.lbl_status.setText("Transcoding...")
+                    self.lbl_status.setStyleSheet("color: #4CAF50;")
+                    self.btn_transcode.setIcon(self.create_geometric_icon("pause", "#40C4FF", size=24))
+        elif state in ['stopped', 'done', 'failed']:
             # Just Remove
             self.removed.emit(self)
+        else:
+            # Pending or others
+            self.removed.emit(self)
+
+    def set_stopped_ui(self):
+        """Transition to 'Stopped' UI state where button becomes X"""
+        self.state = 'stopped'
+        self.stopped = True # Block future progress updates
+        self.progress.setValue(0)
+        self.lbl_status.setText("Stopped")
+        self.lbl_status.setStyleSheet("color: #aaa;")
+        
+        # TRANSITION: Button becomes X (Clear)
+        self.btn_cancel.setFixedSize(30, 30)
+        self.btn_cancel.setIconSize(QSize(24, 24))
+        self.btn_cancel.setIcon(self.create_geometric_icon("close", "#ffffff", size=24)) 
+        self.btn_cancel.setToolTip("移除任務 (Remove)")
+        self.btn_cancel.setStyleSheet(self.get_btn_style("filled_close"))
+        
+        # Reset Transcode Button to Refresh (Original)
+        self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24))
+        self.btn_transcode.setToolTip("重新轉碼 (Re-Transcode)")
 
     def play_or_refresh(self):
         # Reset Style to "Seen" (Transparent)
@@ -573,6 +870,7 @@ class TaskProgressWidget(QWidget):
                  if os.path.exists(self.output_path):
                      self.player_ref.load_video(self.output_path, is_result=True, start_pos=0)
                      self.player_ref.setFocus()
+                     self.switch_page_requested.emit() # [NEW] Switch to Player Page
 
     def play_this(self):
         try:
@@ -639,16 +937,54 @@ class TaskProgressWidget(QWidget):
             painter.setPen(QPen(QColor(color), 3))
             painter.drawLine(m+4, m+4, m+s-4, m+s-4)
             painter.drawLine(m+s-4, m+4, m+4, m+s-4)
+
+        elif shape == "save":
+             # Diskette Icon
+             painter.setBrush(Qt.NoBrush)
+             painter.setPen(QPen(QColor(color), 2))
+             painter.drawRect(m, m, s, s) # Outer
+             painter.drawRect(m+s/4, m, s/2, s/3) # Top Hub
+             painter.drawRect(m+s/6, m+s/2, 2*s/3, s/2) # Bottom Hub
+             painter.setBrush(QColor(color))
+             painter.drawRect(int(m+s/2+2), int(m+2), 4, 6) # Slider
             
         painter.end()
         return QIcon(pixmap)
 
     def open_folder(self):
-        if os.path.exists(self.output_path):
+        # [MODIFIED] Logic to open _DONE folder for Watch Folder Tasks
+        target_path = self.output_path
+        
+        # Check if it's a Watch Folder Task (source moved to _DONE)
+        try:
+             # Logic: If source_type is not Manual, we try to find the _DONE folder relative to source
+             # However, we only have self.output_path nicely stored? 
+             # We should check self.task_data["source"] and reconstruct _DONE path
+             if self.task_data and self.task_data.get("source_type") != "Manual":
+                 src = self.task_data.get("source")
+                 if src:
+                     src_dir = os.path.dirname(src)
+                     done_dir = os.path.join(src_dir, "_DONE")
+                     if os.path.exists(done_dir):
+                         os.startfile(done_dir)
+                         return
+        except: pass
+        
+        # Fallback to Output Folder
+        if os.path.exists(target_path):
             try:
-                folder = os.path.dirname(self.output_path)
+                if os.path.isfile(target_path):
+                    folder = os.path.dirname(target_path)
+                else:
+                    folder = target_path
                 os.startfile(folder)
             except: pass
+        elif self.output_path:
+             try:
+                 folder = os.path.dirname(self.output_path)
+                 if os.path.exists(folder):
+                      os.startfile(folder)
+             except: pass
 
 
 
@@ -736,8 +1072,22 @@ class ModernTranscoderUI(QMainWindow):
         # Update with new system presets (PRESETS)
         # This ensures new features appear even if file exists
         current_presets.update(PRESETS)
-        self.settings.set("presets", current_presets)
+        self.settings.set("presets", current_presets) # Keep this line, as it updates the settings object.
         
+        # Assuming self.settings_mgr is meant to be self.settings
+        # If self.settings_mgr is a separate object, it needs to be initialized.
+        # Based on the context, self.settings is the SettingsManager instance.
+        # The instruction's line `self.settings = self.settings_mgr.load_settings()`
+        # seems to be a misunderstanding or a future change not fully reflected.
+        # I will interpret it as adding the new attribute.
+        
+        # [FIX] Session-based Deleted Filter for Ghost Tasks
+        # Load persisted ignore list
+        deleted_list = self.settings.get("deleted_tasks", [])
+        self.deleted_cluster_tasks = set(deleted_list)
+        debug_log(f"Loaded {len(self.deleted_cluster_tasks)} deleted tasks from settings.")
+        
+        # UI Setup
         self.setWindowTitle("ProTranscoder 2026 - Windows 11 Edition")
         self.resize(1200, 800)
         self.current_source = ""
@@ -749,13 +1099,11 @@ class ModernTranscoderUI(QMainWindow):
         # [NEW] Initialize Watch Folder Engine
         self.watch_engine = WatchFolderEngine(self.settings, self)
         self.watch_engine.file_detected.connect(self.on_watch_folder_detected)
-        self.watch_engine.start()
         
         # [NEW] Initialize Cluster Manager
         self.cluster_mgr = ClusterManager(self.settings, self)
         self.cluster_mgr.task_synced.connect(self.on_cluster_task_synced)
         self.cluster_mgr.node_updated.connect(self.on_cluster_node_updated)
-        self.cluster_mgr.start()
 
         debug_log("MainWindow: Calling setup_ui")
         self.setup_ui()
@@ -768,6 +1116,14 @@ class ModernTranscoderUI(QMainWindow):
         
         debug_log("MainWindow: Loading Pending Tasks")
         self.load_pending_tasks() # Restore tasks
+        
+        # Start Background Services AFTER UI Init
+        # [OPTIMIZATION] Delay Start to allow UI to render first (Fixes "Slow Startup" feeling)
+        if self.settings.get("cluster_role", "Master") == "Master":
+            QTimer.singleShot(2000, self.watch_engine.start)
+            
+        # Cluster Manager often hits network drives (slow), call it later
+        QTimer.singleShot(4000, self.cluster_mgr.start)
         
         # Auto-save timer (every 30 seconds)
         self.auto_save_timer = QTimer(self)
@@ -998,6 +1354,10 @@ class ModernTranscoderUI(QMainWindow):
         # Trigger load if a valid preset was selected
         if self.combo_presets.currentText() != "Custom / Unsaved":
             self.load_preset(self.combo_presets.currentText())
+            
+        # [NEW] Refresh Watch List & Cluster on Start
+        self.refresh_watch_list_ui()
+        self.refresh_cluster_ui()
 
     def save_settings(self):
         if getattr(self, 'loading', False):
@@ -1025,6 +1385,10 @@ class ModernTranscoderUI(QMainWindow):
         # Save VU Offset
         if hasattr(self, 'player'):
             self.settings.set("vu_offset", self.player.get_vu_offset())
+            
+        # [NEW] Save Deleted Tasks History
+        if hasattr(self, 'deleted_cluster_tasks'):
+             self.settings.set("deleted_tasks", list(self.deleted_cluster_tasks))
         
         # Save specific history for this file
         if last_file and hasattr(self, 'player'):
@@ -1068,6 +1432,101 @@ class ModernTranscoderUI(QMainWindow):
         self.save_settings()
         print("DEBUG: closeEvent complete")
         event.accept()
+
+    def create_geometric_icon(self, shape, color="#E0E0E0", size=32):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        pen = QPen(QColor(color))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        
+        # Margins to prevent clipping
+        m = 2 
+        s = size - 2*m
+        
+        if shape == "play":
+            painter.setBrush(QColor(color))
+            painter.setPen(Qt.NoPen)
+            path = QPainterPath()
+            path.moveTo(m + 1, m)
+            path.lineTo(m + s, m + s/2)
+            path.lineTo(m + 1, m + s)
+            path.closeSubpath()
+            painter.drawPath(path)
+            
+        elif shape == "folder":
+            painter.setBrush(Qt.NoBrush) 
+            painter.setPen(QPen(QColor(color), 1.8))
+            # Clean Outline Folder (Reference Style)
+            path = QPainterPath()
+            path.moveTo(m, m + 4)
+            path.lineTo(m + s*0.4, m + 4)
+            path.lineTo(m + s*0.5, m + 8)
+            path.lineTo(m + s, m + 8)
+            path.lineTo(m + s, m + s)
+            path.lineTo(m, m + s)
+            path.closeSubpath()
+            painter.drawPath(path)
+        elif shape == "refresh":
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(color), 2.5))
+            rect = QRectF(m, m, s, s)
+            painter.drawArc(rect, 30 * 16, 300 * 16) 
+            painter.drawLine(int(m+s-4), int(m+s/2), int(m+s), int(m+s/2+4))
+            
+        elif shape == "stop":
+            painter.setBrush(QColor(color))
+            painter.setPen(Qt.NoPen)
+            pad = 2 # Reduced Padding
+            painter.drawRect(m+pad, m+pad, s-2*pad, s-2*pad)
+
+        elif shape == "pause":
+            painter.setBrush(QColor(color))
+            painter.setPen(Qt.NoPen)
+            w = (s - 6)/2
+            painter.drawRect(m + 2, m + 4, w, s - 8)
+            painter.drawRect(m + 2 + w + 2, m + 4, w, s - 8)
+
+        elif shape == "close":
+            painter.setPen(QPen(QColor(color), 3))
+            painter.drawLine(m+4, m+4, m+s-4, m+s-4)
+            painter.drawLine(m+s-4, m+4, m+4, m+s-4)
+
+        elif shape == "save":
+             painter.setBrush(Qt.NoBrush)
+             painter.setPen(QPen(QColor(color), 1.8))
+             # Very Clean Outline Diskette
+             painter.drawRoundedRect(m, m, s, s, 1, 1)
+             painter.drawRect(int(m + s*0.3), m, int(s*0.4), int(s*0.3))
+             painter.drawRoundedRect(int(m + s*0.2), int(m + s*0.6), int(s*0.6), int(s*0.4), 1, 1)
+             
+        elif shape == "edit":
+            # Concise Line-Art Pencil (Outline) - Larger & Bolder
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(color), 2.2))
+            path = QPainterPath()
+            # Body outline
+            path.moveTo(m + 1, m + s - 4)
+            path.lineTo(m + s - 4, m + 1)
+            path.lineTo(m + s - 1, m + 4)
+            path.lineTo(m + 4, m + s - 1)
+            path.closeSubpath()
+            # Tip (connected)
+            path.moveTo(m + 1, m + s - 4)
+            path.lineTo(m, m + s)
+            path.lineTo(m + 4, m + s - 1)
+            painter.drawPath(path)
+        elif shape == "delete":
+            # Large X
+            painter.setPen(QPen(QColor(color), 2.5))
+            painter.drawLine(m+4, m+4, m+s-4, m+s-4)
+            painter.drawLine(m+s-4, m+4, m+4, m+s-4)
+            
+        painter.end()
+        return QIcon(pixmap)
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -1130,7 +1589,18 @@ class ModernTranscoderUI(QMainWindow):
         w_title = QLabel("📂 監控資料夾設定 (Watch Folder Settings)")
         w_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #4CAF50;")
         w_layout.addWidget(w_title)
+
+        # Global Engine Status
+        self.lbl_watch_GlobalStatus = QLabel("核心引擎狀態: 運行中 (Running)")
+        self.lbl_watch_GlobalStatus.setStyleSheet("color: #666; font-size: 12px; margin-bottom: 10px;")
+        w_layout.addWidget(self.lbl_watch_GlobalStatus)
+        
         self.watch_list = QListWidget()
+        self.watch_list.setStyleSheet("""
+            QListWidget { background-color: #2b2b2b; color: #e0e0e0; border: 1px solid #444; }
+            QListWidget::item { border-bottom: 1px solid #333; }
+            QListWidget::item:selected { background-color: transparent; }
+        """)
         w_layout.addWidget(self.watch_list)
         w_btn_add = QPushButton("添加監控路徑 (Add Path)")
         w_btn_add.clicked.connect(self.add_watch_folder_ui)
@@ -1143,9 +1613,22 @@ class ModernTranscoderUI(QMainWindow):
         cl_title = QLabel("🖥 集群節點狀態 (Cluster Nodes)")
         cl_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #BB86FC;")
         cl_layout.addWidget(cl_title)
+
+        # [NEW] Role Selection
+        role_frame = QFrame()
+        role_layout = QHBoxLayout(role_frame)
+        role_layout.addWidget(QLabel("集群運行角色 (Cluster Role):"))
+        self.combo_role = QComboBox()
+        self.combo_role.addItems(["主監控節點 (Master - Scans Folder)", "工作計算節點 (Worker - Just Transcode)"])
+        role_val = self.settings.get("cluster_role", "Master")
+        self.combo_role.setCurrentIndex(0 if role_val == "Master" else 1)
+        role_layout.addWidget(self.combo_role)
+        cl_layout.addWidget(role_frame)
+
         self.node_list = QListWidget()
-        cl_layout.addWidget(self.node_list)
+        cl_layout.addWidget(self.node_list, 1) # Expand
         self.lbl_node_info = QLabel("本機辨識碼 (Local Node): -")
+        self.lbl_node_info.setStyleSheet("color: #888; font-family: monospace;")
         cl_layout.addWidget(self.lbl_node_info)
         self.stack.addWidget(self.cluster_page)
         
@@ -1182,16 +1665,85 @@ class ModernTranscoderUI(QMainWindow):
         s_layout.addWidget(s_title)
         
         s_form = QGridLayout()
-        s_form.addWidget(QLabel("集群同步路徑 (Cluster Sync Path):"), 0, 0)
-        self.edit_cluster_path = QLineEdit(self.settings.get("cluster_path", ""))
-        s_form.addWidget(self.edit_cluster_path, 0, 1)
         
-        btn_save_s = QPushButton("儲存設定 (Save Settings)")
+        # 1. Cluster Path
+        s_form.addWidget(QLabel("集群同步路徑 (Cluster Sync Path):"), 0, 0)
+        cl_path_layout = QHBoxLayout()
+        self.edit_cluster_path = QLineEdit()
+        self.edit_cluster_path.setText(self.settings.get("cluster_path", ""))
+        cl_path_layout.addWidget(self.edit_cluster_path)
+        btn_browse_cl = QPushButton("瀏覽 (Browse)")
+        btn_browse_cl.clicked.connect(self.browse_cluster_path)
+        cl_path_layout.addWidget(btn_browse_cl)
+        s_form.addLayout(cl_path_layout, 0, 1)
+        
+        # [NEW] Parallel Tasks Control
+        s_form.addWidget(QLabel("最大同時轉碼數量 (Max Parallel):"), 1, 0)
+        parallel_layout = QHBoxLayout()
+        self.spin_parallel = QSpinBox()
+        self.spin_parallel.setRange(1, 16)
+        suggested = self.settings.get("max_parallel_tasks", 1)
+        self.spin_parallel.setValue(suggested)
+        parallel_layout.addWidget(self.spin_parallel)
+        
+        btn_suggest = QPushButton("硬體建議 (Suggest)")
+        btn_suggest.clicked.connect(self.apply_recommended_concurrency)
+        parallel_layout.addWidget(btn_suggest)
+        s_form.addLayout(parallel_layout, 1, 1)
+        
+        btn_save_s = QPushButton("儲存設定 (Save)")
+        btn_save_s.setFixedHeight(40)
+        btn_save_s.setIcon(self.create_geometric_icon("save", "#ffffff", size=32))
         btn_save_s.clicked.connect(self.save_global_settings_ui)
         s_layout.addLayout(s_form)
         s_layout.addWidget(btn_save_s)
         s_layout.addStretch()
         self.stack.addWidget(self.settings_page)
+        
+        # --- Page 4: Dashboard (Automated Monitor) ---
+        self.dashboard_page = QWidget()
+        db_layout = QVBoxLayout(self.dashboard_page)
+        db_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Dashboard Header (Shared Style)
+        db_header_frame = QFrame()
+        db_header_frame.setFixedHeight(30)
+        db_header_frame.setStyleSheet("background-color: #333; border-bottom: 1px solid #444;")
+        dbh_layout = QGridLayout(db_header_frame)
+        dbh_layout.setContentsMargins(5, 0, 5, 0) # Aligned with Row Widget
+        dbh_layout.setSpacing(10)
+        
+        col_lbls = [
+            ("任務名稱", 240), ("狀態", 100), ("格式資訊", 240), 
+            ("轉碼起-訖時間", 200), ("效能", 100), ("來源", 100), 
+            ("節點", 60), ("進度", 150), ("操作", 140)
+        ]
+        for i, (txt, w) in enumerate(col_lbls):
+            l = QLabel(txt)
+            l.setFixedWidth(w)
+            l.setStyleSheet("color: #888; font-size: 11px; font-weight: bold;")
+            dbh_layout.addWidget(l, 0, i)
+        
+        db_layout.addWidget(db_header_frame)
+        
+        # Automated Task List
+        self.auto_task_list = QListWidget()
+        self.auto_task_list.setAlternatingRowColors(True)
+        self.auto_task_list.setStyleSheet("""
+            QListWidget {
+                background-color: #202020;
+                border: 1px solid #333;
+                border-radius: 4px;
+            }
+            QListWidget::item {
+                border-bottom: 1px solid #333;
+            }
+            QListWidget::item:selected {
+                background-color: #444; 
+            }
+        """)
+        db_layout.addWidget(self.auto_task_list)
+        self.stack.addWidget(self.dashboard_page)
 
         debug_log("setup_ui: Creating Buttons")
         # Action Bar (Add Task + Start All)
@@ -1588,7 +2140,7 @@ class ModernTranscoderUI(QMainWindow):
         self.combo_acode.currentTextChanged.connect(self.save_settings)
         t_row1.addWidget(self.combo_acode, 1)
         
-        t_row1.addLayout(t_row1)
+
         
         # Row 1.5: FPS & TV System
         t_row15 = QHBoxLayout()
@@ -1813,8 +2365,12 @@ class ModernTranscoderUI(QMainWindow):
             dbh_layout.addWidget(l)
         dbh_layout.addStretch()
         mon_layout.addWidget(db_header)
-        self.task_list.setAlternatingRowColors(True)
-        self.task_list.setStyleSheet("""
+        dbh_layout.addStretch()
+        mon_layout.addWidget(db_header)
+        self.manual_task_list = QListWidget()
+        mon_layout.addWidget(self.manual_task_list)
+        self.manual_task_list.setAlternatingRowColors(True)
+        self.manual_task_list.setStyleSheet("""
             QListWidget {
                 background-color: #2b2b2b;
                 border: 1px solid #333;
@@ -1827,9 +2383,9 @@ class ModernTranscoderUI(QMainWindow):
                 background-color: #444; 
             }
         """)
-        self.task_list.itemClicked.connect(self.on_task_item_clicked)
-        self.task_list.itemDoubleClicked.connect(self.on_task_item_double_clicked)
-        mon_layout.addWidget(self.task_list)
+        self.manual_task_list.itemClicked.connect(self.on_task_item_clicked)
+        self.manual_task_list.itemDoubleClicked.connect(self.on_task_item_double_clicked)
+        mon_layout.addWidget(self.manual_task_list)
         content_splitter.addWidget(monitor_widget)
         
         trans_layout.addWidget(content_splitter)
@@ -2317,8 +2873,74 @@ class ModernTranscoderUI(QMainWindow):
 
     def clean_up_after_task(self):
         self.current_running_task = None
-        # self.current_worker = None # Removed
         self.process_next_task()
+
+    def process_next_task(self):
+        """
+        Central Scheduler (Queue Pump).
+        Scans Manual & Auto lists for 'Pending' tasks and starts them 
+        if concurrency limit permits.
+        """
+        # 1. Check Concurrency Limit
+        max_concurrent = self.spin_concurrent.value()
+        current_running = len(self.workers)
+        
+        # DEBUG LOGGING FOR USER Report (3 vs 2 issue)
+        debug_log(f"Queue Pump: Initial Check - Running: {current_running} / Max: {max_concurrent}")
+        
+        if current_running >= max_concurrent:
+            # Full capacity
+            self.is_processing = True 
+            self.btn_start_all.setEnabled(False) 
+            return
+
+        available_slots = max_concurrent - current_running
+        if available_slots <= 0: return
+
+        # 2. Helper to find next pending widget
+        def find_next_pending(list_widget, name="List"):
+            count = list_widget.count()
+            for i in range(count):
+                item = list_widget.item(i)
+                widget = list_widget.itemWidget(item)
+                if not widget: continue
+                
+                status = widget.lbl_status.text()
+                
+                # Ensure it's not already running
+                if widget in self.workers: continue
+                
+                if status == "Pending":
+                    debug_log(f"Queue Pump: Found Pending in {name} at row {i}")
+                    return widget
+            return None
+
+        # 3. Priority: Manual Items First
+        next_widget = find_next_pending(self.manual_task_list, "Manual")
+        
+        # 4. Secondary: Auto Items (Watch Folder)
+        if not next_widget:
+            next_widget = find_next_pending(self.auto_task_list, "Auto")
+
+        # 5. Execute if found
+        if next_widget:
+            task_data = getattr(next_widget, 'task_data', {})
+            if task_data:
+                debug_log(f"Queue Pump: Starting Task {task_data.get('base_name')}")
+                self.start_transcode_task(task_data, widget_ref=next_widget)
+                
+                # RECURSIVE PUMP:
+                # If we still have slots, try to find another one immediately
+                if len(self.workers) < max_concurrent:
+                     QTimer.singleShot(100, self.process_next_task)
+        else:
+            debug_log("Queue Pump: No Pending Tasks found.")
+            # No more pending tasks
+            if current_running == 0:
+                self.is_processing = False
+                self.btn_start_all.setEnabled(True) 
+            else:
+                pass
 
     def remove_task_by_widget(self, widget_to_remove):
         print("DEBUG: Removing Task...")
@@ -2343,70 +2965,163 @@ class ModernTranscoderUI(QMainWindow):
                         worker.wait(100) # Give it time to die
                   worker.deleteLater()
                   del self.workers[widget_to_remove]
+                  
+                  # [NEW] Check if we need to fill the slot
+                  QTimer.singleShot(500, self.process_next_task)
+                  
              elif getattr(self, 'current_running_task', None) and self.current_running_task.get("widget") == widget_to_remove:
                    # Fallback if somehow not in workers dict but marked as active
                    self.clean_up_after_task()
+                   
+        # [FIX] Cluster Ghost Task: Cancel on Cluster
+        # If this is a Cluster Task (from another node), removing it locally should stop it re-appearing.
+        # We delete the JSON file from the shared folder.
+        task_data = getattr(widget_to_remove, 'task_data', {})
+        worker_id = task_data.get("worker_id", "-")
+        source_type = task_data.get("source_type", "")
+        
+        if worker_id == "Cluster" or "Node:" in source_type:
+            base_name = task_data.get("base_name")
+            if base_name:
+                # [FIX] In-Memory Filter: Ensure it doesn't come back this session
+                # Use composite key to allow re-adding same-named tasks (different timestamp)
+                b_time = task_data.get("broadcast_time", "0")
+                unique_key = f"{base_name}|{b_time}"
+                
+                self.deleted_cluster_tasks.add(unique_key)
+                # Also support legacy simple name blocking just in case
+                # self.deleted_cluster_tasks.add(base_name) 
+                
+                if hasattr(self, 'cluster_mgr'):
+                    self.cluster_mgr.delete_cluster_task(base_name)
+                    debug_log(f"Removed Cluster Task and deleted backend file: {base_name} (Key: {unique_key})")
+                
+                # [FIX] Force Save immediately to persist the ban list
+                self.save_settings()
                  
-        # 2. Check Pending Queue
+        # 2. Check Pending Queue (Legacy List - Keep for safety but Queue Pump uses UI)
         for i, task in enumerate(self.pending_tasks):
             if task.get("widget") == widget_to_remove:
                 print(f"DEBUG: Removed pending task index {i}")
                 self.pending_tasks.pop(i)
                 break
                 
-        # 3. Remove from UI List
-        for i in range(self.task_list.count()):
-            item = self.task_list.item(i)
-            if self.task_list.itemWidget(item) == widget_to_remove:
-                self.task_list.takeItem(i)
-                print(f"DEBUG: Removed UI item at row {i}")
-                break
-                
+        # 3. Remove from UI List (Check BOTH)
+        def remove_from_list(list_widget):
+            for i in range(list_widget.count()):
+                item = list_widget.item(i)
+                if list_widget.itemWidget(item) == widget_to_remove:
+                    list_widget.takeItem(i)
+                    print(f"DEBUG: Removed UI item at row {i}")
+                    return True
+            return False
+
+        if not remove_from_list(self.manual_task_list):
+            remove_from_list(self.auto_task_list)
+            
+        # [NEW] Remove Mirror Widget (if exists)
+        task_data = getattr(widget_to_remove, 'task_data', {})
+        mirror_item = task_data.get("mirror_item")
+        if mirror_item:
+             # It's in auto_task_list
+             row = self.auto_task_list.row(mirror_item)
+             if row >= 0:
+                 self.auto_task_list.takeItem(row)
+
         # 4. Check Queue State
-        if not self.is_processing and not self.pending_tasks:
-             self.btn_start_all.setEnabled(True) # Corrected from btn_execute
+        if not self.workers and not self.pending_tasks: # Simple check
+             self.btn_start_all.setEnabled(True) 
 
     def clear_task_list(self):
-        # Only clear "Done" tasks as per user request
-        # Do NOT clear pending_tasks automatically
+        # Only clear "Done" tasks from MANUAL list? 
+        # Or both? Let's assume Manual List button clears Manual, Dashboard has its own? 
+        # Since button is on Transcoder page check Manual List.
+        # But if we want global clear...
+        # For now, clear both Manual and Auto done tasks.
         
-        count = self.task_list.count()
-        for i in range(count - 1, -1, -1):
-            item = self.task_list.item(i)
-            widget = self.task_list.itemWidget(item)
-            
-            if not widget:
-                continue
-                
-            # Only remove if status is "Done"
-            if widget.lbl_status.text().strip() == "Done":
-                self.task_list.takeItem(i)
+        def clear_list(list_widget):
+            count = list_widget.count()
+            for i in range(count - 1, -1, -1):
+                item = list_widget.item(i)
+                widget = list_widget.itemWidget(item)
+                if not widget: continue
+                if widget.lbl_status.text().strip() == "Done":
+                    list_widget.takeItem(i)
+
+        clear_list(self.manual_task_list)
+        clear_list(self.auto_task_list)
         
         # If nothing running, ensure button state
         if not self.is_processing:
-            if self.task_list.count() == 0:
+            if self.manual_task_list.count() == 0 and self.auto_task_list.count() == 0:
                  self.btn_start_all.setEnabled(True) # Ready
             else:
                  # Check if we have pending tasks to re-enable? 
                  # Actually simply check queue state
                  self.btn_start_all.setEnabled(bool(self.pending_tasks))
 
-    def add_task_to_queue(self, source_path=None, full_duration=False, source_type="Manual", worker_id="-", preset_name=None):
+    def add_task_to_queue(self, source_path=None, full_duration=False, source_type="Manual", worker_id="Auto", preset_name=None, base_name_override=None, extra_data=None):
+        """
+        Main entry point to add a task (Manual or Auto).
+        """
         print(f"DEBUG: add_task_to_queue triggered. Source: {source_type}")
-        target_source = source_path if source_path else self.current_source
-        
-        if not target_source:
-             if source_type == "Manual":
-                QMessageBox.warning(self, "無來源 (No Source)", "請先載入或播放一個影片檔案 (Please load a video first)")
-             return
+
+        # 1. Determine Source
+        if not source_path:
+            # Manual Mode: use current playlist item
+            if not self.current_source:
+                if source_type == "Manual":
+                    QMessageBox.warning(self, "無來源 (No Source)", "請先載入或播放一個影片檔案 (Please load a video first)")
+                return
+            source = self.current_source
+        else:
+            source = source_path
             
+        # [FIX] Final Safety Check: File Must Exist
+        if not os.path.exists(source):
+            debug_log(f"add_task_to_queue: Ignored non-existent file: {source}")
+            return
+            
+        # 2. Base Name
         # Capture current naming
-        if self.chk_rename.isChecked() and self.edit_base_name.text().strip() and source_type == "Manual":
+        if base_name_override:
+            base_name = base_name_override
+        elif self.chk_rename.isChecked() and self.edit_base_name.text().strip() and source_type == "Manual":
             base_name = self.edit_base_name.text().strip()
         else:
-            base_name = os.path.splitext(os.path.basename(target_source))[0]
+            base_name = os.path.splitext(os.path.basename(source))[0]
             
-        final_base = f"{base_name}_{self.spin_seq.value():03d}"
+        # 3. Gather Settings (Target)
+        task_data = {
+            "source": source,
+            "base_name": base_name,
+            "source_type": source_type,
+            "worker_id": worker_id,
+            "status": "Pending",
+            "progress": 0,
+            "timestamp": time.time()
+        }
+        
+        # Copy global settings
+        # [NEW] Visual Separation for Automated Tasks
+        display_name_prefix = ""
+        if source_type != "Manual":
+             # Auto-Naming distinction
+             # Don't change base_name (filename), just the reference? 
+             # Actually, let's keep filename clean, but we can set a visual tag in the Widget.
+             pass
+             
+        if source_type == "Manual":
+             final_base = f"{base_name}_{self.spin_seq.value():03d}"
+        else:
+             final_base = base_name
+        
+        if source_type != "Manual":
+             # For WatchFolder, maybe keep original name? 
+             # User Request: "Sequencing" might confuse automation. 
+             # Let's keep sequence for uniqueness, BUT if it's WatchFolder, we usually want exact match?
+             # Let's stick to sequence for safety to avoid overwrite, but maybe append [AUTO] to display?
+             pass
         
         # Determine in/out
         in_p = self.player.in_point if (not source_path or source_path == self.current_source) else 0
@@ -2425,11 +3140,11 @@ class ModernTranscoderUI(QMainWindow):
 
         # Prepare params
         task = {
-            "source": target_source,
+            "source": source,
             "in_point": in_p,
             "out_point": out_p,
             "base_name": final_base,
-            "output_dir": getattr(self, 'output_dir', os.path.dirname(target_source)),
+            "output_dir": getattr(self, 'output_dir', os.path.dirname(source)),
             "sequence": self.spin_seq.value(),
             "bitrate": self.edit_bitrate.text(),
             "container": self.combo_container.currentText(),
@@ -2443,6 +3158,10 @@ class ModernTranscoderUI(QMainWindow):
             "source_type": source_type,
             "worker_id": worker_id
         }
+        
+        # [FIX] Merge Extra Data (e.g. broadcast_time from Cluster)
+        if extra_data:
+            task.update(extra_data)
 
         # Override with preset if provided (for Watch Folder)
         if preset_name and preset_name in PRESETS:
@@ -2458,9 +3177,24 @@ class ModernTranscoderUI(QMainWindow):
              })
         
         # Add a visual entry in the list as "Pending"
-        item = QListWidgetItem(self.task_list)
-        item.setSizeHint(QSize(0, 36)) # Reduced height (was 50)
-        widget = TaskProgressWidget(final_base)
+        # [ROUTING] Select List Widget based on Source Type
+        target_list = self.manual_task_list
+        if source_type != "Manual":
+            target_list = self.auto_task_list
+            
+        item = QListWidgetItem(target_list)
+        item.setSizeHint(QSize(0, 36)) # Reduced height        
+        # [NEW] Visual Distinction
+        display_label = final_base
+        if source_type != "Manual":
+            display_label = f"[監控] {final_base}"
+            
+        widget = TaskProgressWidget(display_label)
+        
+        # Apply different color for Auto Tasks
+        if source_type != "Manual":
+             widget.setStyleSheet("QFrame#TaskRow { background-color: #203020; } QLabel { color: #cfd8dc; }")
+             
         widget.set_task_data(task) # Store Data & Set Tooltip
         widget.lbl_status.setText("Pending")
         widget.removed.connect(self.remove_task_by_widget) # CONNECT SIGNAL
@@ -2468,9 +3202,43 @@ class ModernTranscoderUI(QMainWindow):
         widget.pause_requested.connect(self.pause_task)
         widget.resume_requested.connect(self.resume_task)
         widget.stop_requested.connect(self.stop_current_task)
-        self.task_list.addItem(item)
-        self.task_list.setItemWidget(item, widget)
+        widget.switch_page_requested.connect(self.show_transcoder_page) # [NEW] Switch to Player Page
+        
+        target_list.addItem(item)
+        target_list.setItemWidget(item, widget)
         task["widget"] = widget # Store widget ref for later
+        
+        # [NEW] Dashboard Mirror for Manual Tasks
+        # User request: "Manual add task also appear in DASHBOARD"
+        if source_type == "Manual":
+            # Add to Auto Task List (Dashboard) as well
+            item_mirror = QListWidgetItem(self.auto_task_list)
+            item_mirror.setSizeHint(QSize(0, 36))
+            
+            widget_mirror = TaskProgressWidget(f"[手動鏡像] {final_base}")
+            widget_mirror.setStyleSheet("QFrame#TaskRow { background-color: #2b2b2b; } QLabel { color: #e0e0e0; font-style: italic; }")
+            widget_mirror.set_task_data(task)
+            widget_mirror.lbl_status.setText("Pending")
+            
+            # Connect signals from mirror to same slots
+            # Note: We pass 'widget' (original) to slots effectively by proxy?
+            # Actually, the slots usually use the sender. 
+            # We connect mirror signals to trigger actions on the *original* widget logic if needed.
+            # Simpler: Just make the buttons on mirror trigger the same actions on 'widget'
+            
+            # Mirror -> Main Actions
+            widget_mirror.transcode_requested.connect(lambda w: self.transcode_single_item(widget))
+            widget_mirror.pause_requested.connect(lambda w: self.pause_task(widget))
+            widget_mirror.resume_requested.connect(lambda w: self.resume_task(widget))
+            widget_mirror.stop_requested.connect(lambda w: self.stop_current_task(widget))
+            widget_mirror.removed.connect(lambda w: self.remove_task_by_widget(widget)) # Removing mirror removes real task
+            
+            self.auto_task_list.addItem(item_mirror)
+            self.auto_task_list.setItemWidget(item_mirror, widget_mirror)
+            
+            # Store mirror ref in task for updates
+            task["mirror_widget"] = widget_mirror
+            task["mirror_item"] = item_mirror # For removal
         
         # Atomic Add: Only append to queue after successful setup
         self.pending_tasks.append(task)
@@ -2489,6 +3257,10 @@ class ModernTranscoderUI(QMainWindow):
             self.player.update_trim_labels()
             
         self.save_settings()
+        
+        # [NEW] Trigger Queue Pump
+        # Auto-start if slots available
+        self.process_next_task()
 
     def add_all_to_queue(self):
         """Add selected items in the playlist, or all if none selected."""
@@ -2537,7 +3309,7 @@ class ModernTranscoderUI(QMainWindow):
         pass
 
     def on_task_item_double_clicked(self, item):
-        widget = self.task_list.itemWidget(item)
+        widget = self.manual_task_list.itemWidget(item)
         if widget and widget.task_data:
             task = widget.task_data
             src = task.get("source")
@@ -2557,25 +3329,65 @@ class ModernTranscoderUI(QMainWindow):
                     self.statusBar().showMessage(f"已載入任務來源: {os.path.basename(src)}", 3000)
 
     def start_transcoding_queue(self):
-        if not self.pending_tasks or self.is_processing:
+        if not self.pending_tasks:
             return
+        
         self.is_processing = True
         self.btn_start_all.setEnabled(False)
         self.process_next_task()
 
     def transcode_single_item(self, widget):
-        # Allow start if:
-        # 1. No other task is RUNNING (active)
-        # 2. Or if other tasks are PAUSED.
-        
+        # Even for single run, we check if we have room
+        max_parallel = self.settings.get("max_parallel_tasks", 1)
         active_running = [w for w in self.workers.values() if not w.paused]
         
-        if active_running:
-            QMessageBox.warning(self, "忙碌中 (Busy)", "有其他任務正在進行中。請先暫停該任務，再啟動此任務。\n(Another task is running. Please pause it first.)")
+        if len(active_running) >= max_parallel:
+            # ... warning ...
             return
             
         task = widget.task_data
         
+        # [NEW] Handle Diagnosis on Retry/Manual Start
+        # Check if failed OR has error log
+        # Robust check: 'state' attr OR status text
+        current_status = widget.lbl_status.text()
+        is_failed = getattr(widget, 'state', '') == 'failed' or "Failed" in current_status
+        has_log = hasattr(widget, 'last_error_log') and widget.last_error_log
+        
+        if is_failed:
+             log = widget.last_error_log if has_log else "No Error Log Available. (Unknown Error)"
+             
+             # Only show if it's not a cancellation
+             if "Cancelled" not in log:
+                 suggestion, fix_params = self.analyze_error_suggestion(log)
+                 
+                 # Force a fix option if none returned (Safety Mode)
+                 if not fix_params:
+                     # Check for Input Errors specifically
+                     if "Error opening input" in log or "Invalid argument" in log:
+                         suggestion = "無法開啟輸入檔案。可能是路徑包含特殊字元、檔案被佔用或損壞。\n\n即使重置參數也可能無法解決輸入問題，但您可以嘗試 [安全重置] 作為最後手段。"
+                     else:
+                         suggestion = (suggestion + "\n\n💡 系統無法識別具體錯誤，但您可以嘗試 [安全重置] (H.264/AAC)。") if suggestion else "未知錯誤。\n\n💡 建議：嘗試 [安全重置]。"
+                     
+                     fix_params = {"vcodec": "libx264", "acodec": "aac", "container": "mp4"}
+                 
+                 dlg = SmartFailureDialog(log, suggestion, fix_params, self)
+                 if dlg.exec():
+                     if dlg.apply_fix and fix_params:
+                         # Apply fix to task params
+                         for k, v in fix_params.items():
+                             task[k] = v
+                         widget.last_error_log = "" # Clear after fix applied
+                         # Update UI Tag to show it was fixed?
+                         widget.lbl_info.setText(f"{task.get('container')} / {task.get('vcodec')} (Reset)")
+                         # Reset stats to allow immediate retry logic to pick it up properly
+                         widget.lbl_status.setText("Pending") 
+                         widget.lbl_status.setStyleSheet("color: #ffa726;")
+                         widget.state = "pending"
+                 else:
+                     # If user rejects the dialog, don't start the transcode
+                     return
+
         # Ensure task is removed from pending list if it was there
         if task in self.pending_tasks:
             self.pending_tasks.remove(task)
@@ -2585,20 +3397,23 @@ class ModernTranscoderUI(QMainWindow):
         self.run_transcode(task, single_run=True)
 
     def process_next_task(self):
-        if not self.pending_tasks:
+        """Fills up available slots up to max_parallel_tasks."""
+        max_parallel = self.settings.get("max_parallel_tasks", 1)
+        active_count = len(self.workers)
+        
+        while active_count < max_parallel and self.pending_tasks:
+            task = self.pending_tasks.pop(0)
+            # Safety Check: Skip broken tasks (e.g. from previous crashes)
+            if "widget" not in task:
+                print("Skipping broken task (no widget)")
+                continue
+            
+            self.run_transcode(task)
+            active_count += 1
+            
+        if not self.pending_tasks and active_count == 0:
             self.is_processing = False
-            # Check if we should re-enable (if user added more while processing?)
-            self.btn_start_all.setEnabled(False)
-            return
-            
-        task = self.pending_tasks.pop(0)
-        # Safety Check: Skip broken tasks (e.g. from previous crashes)
-        if "widget" not in task:
-            print("Skipping broken task (no widget)")
-            self.process_next_task()
-            return
-            
-        self.run_transcode(task)
+            self.btn_start_all.setEnabled(True) # Re-enable when truly empty
 
     def run_transcode(self, task, single_run=False):
         self.current_running_task = task # Store ref for cancellation
@@ -2692,6 +3507,10 @@ class ModernTranscoderUI(QMainWindow):
         
         self.workers[task["widget"]] = worker # Track worker
         task["widget"].lbl_status.setText("Transcoding...")
+        
+        # [NEW] Cluster Activity Update
+        self.cluster_mgr.set_local_activity(f"Transcoding: {task.get('base_name')}")
+        self.cluster_mgr.sync() # Force immediate update
         task["widget"].set_started() # Ensure start time is recorded for UI
 
     def on_nav_clicked(self, clicked_btn):
@@ -2700,8 +3519,12 @@ class ModernTranscoderUI(QMainWindow):
             btn.setChecked(btn == clicked_btn)
         
         # Switch Page
-        if clicked_btn in [self.btn_home, self.btn_dash]:
+        # Switch Page
+        if clicked_btn == self.btn_home:
              self.stack.setCurrentIndex(0) 
+        elif clicked_btn == self.btn_dash:
+             self.refresh_dashboard_from_snapshot() # Sync from FS
+             self.stack.setCurrentIndex(4) # New Dashboard Page
         elif clicked_btn == self.btn_watch:
              self.refresh_watch_list_ui()
              self.stack.setCurrentIndex(1)
@@ -2711,21 +3534,136 @@ class ModernTranscoderUI(QMainWindow):
         elif clicked_btn == self.btn_settings:
              self.stack.setCurrentIndex(3)
 
+    def browse_cluster_path(self):
+        """Opens a folder dialog to select the cluster sync path."""
+        folder = QFileDialog.getExistingDirectory(self, "選擇集群同步路徑", self.edit_cluster_path.text())
+        if folder:
+            self.edit_cluster_path.setText(os.path.normpath(folder))
+
     def save_global_settings_ui(self):
-        self.settings.set("cluster_path", self.edit_cluster_path.text())
+        new_path_raw = self.edit_cluster_path.text().strip()
+        if not new_path_raw:
+             QMessageBox.warning(self, "設定失敗", "集群同步路徑不能為空。")
+             return
+
+        # Resolve Absolute Path
+        if not os.path.isabs(new_path_raw):
+             # Resolve relative to app dir
+             base_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.getcwd()
+             new_path = os.path.abspath(os.path.join(base_dir, new_path_raw))
+             self.edit_cluster_path.setText(new_path)
+        else:
+             new_path = new_path_raw
+
+        # Validate Path exists and is writable
+        if not os.path.exists(new_path):
+             try:
+                 os.makedirs(new_path, exist_ok=True)
+             except Exception as e:
+                 QMessageBox.critical(self, "路徑無效", 
+                     f"無法建立或存取集群路徑：\n{new_path}\n\n"
+                     f"原因：{e}\n\n"
+                     "💡 補強做法：\n"
+                     "1. 請檢查網路磁碟機是否已正確映射 (如 Z:\\)。\n"
+                     "2. 若使用 UNC 路徑 (\\\\server\\share)，請確保當前使用者具有讀寫權限。")
+                 return
+
+        self.settings.set("cluster_path", new_path)
+        
+        # Parallel Tasks logic
+        self.settings.set("max_parallel_tasks", self.spin_parallel.value())
+
+        # Role Logic
+        new_role = "Master" if self.combo_role.currentIndex() == 0 else "Worker"
+        self.settings.set("cluster_role", new_role)
+        
         self.save_settings()
-        QMessageBox.information(self, "Success", "設定已儲存 (Settings Saved)")
+        
+        # Apply Logic: If Worker, stop watch engine
+        if new_role == "Worker":
+            if self.watch_engine.isRunning():
+                print("Settings: Role changed to Worker. Stopping Watch Engine...")
+                self.watch_engine.stop()
+                self.watch_engine.wait(1000)
+        else:
+            if not self.watch_engine.isRunning():
+                print("Settings: Role changed to Master. Starting Watch Engine...")
+                self.watch_engine.start()
+
+        msg = (f"集群設定已儲存！\n\n"
+               f"目前角色: {new_role}\n"
+               f"同步路徑: {new_path}\n\n"
+               "✅ 其他節點現在應能透過此路徑與本機同步。")
+        QMessageBox.information(self, "設定成功", msg)
+
+    def apply_recommended_concurrency(self):
+        from core.gpu_detector import get_recommended_concurrency
+        val = get_recommended_concurrency()
+        self.spin_parallel.setValue(val)
+        if hasattr(self, 'statusBar'):
+            self.statusBar().showMessage(f"已根據硬體套用建議並行數: {val}", 3000)
 
     def refresh_watch_list_ui(self):
         self.watch_list.clear()
-        for wf in self.settings.get("watch_folders", []):
-            self.watch_list.addItem(f"{wf.get('name')} -> {wf.get('path')} [{wf.get('preset')}]")
+        watch_folders = self.settings.get("watch_folders", [])
+        for i, wf in enumerate(watch_folders):
+            item = QListWidgetItem(self.watch_list)
+            item.setSizeHint(QSize(0, 80)) # Increase height for custom widget
+            
+            # Use Custom Row Widget
+            row_widget = WatchFolderRowWidget(wf, i, self)
+            self.watch_list.addItem(item)
+            self.watch_list.setItemWidget(item, row_widget)
+            
+        # Ensure engine is running ONLY if Master and we have folders
+        if self.settings.get("cluster_role", "Master") == "Master":
+            if hasattr(self, 'watch_engine') and not self.watch_engine.is_running:
+                 self.watch_engine.start()
 
     def refresh_cluster_ui(self):
-        self.lbl_node_info.setText(f"本機辨識碼 (Local Node): {self.cluster_mgr.node_id}")
-        self.node_list.clear()
+        role = self.settings.get("cluster_role", "Master")
+        # Update Local Info Header
+        self.lbl_node_info.setText(f"本機辨識碼 (Local Node): {self.cluster_mgr.node_id}  |  角色: [{role}]")
+        
+        self.node_list.clear() # Re-build list
+        
+        # 1. Add Local Node (First)
+        # Construct local data on the fly
+        import psutil
+        local_data = {
+            "role": role,
+            "ip": "127.0.0.1", 
+            "status": "Online (Local)",
+            "cpu_usage": psutil.cpu_percent(),
+            "ram_usage": psutil.virtual_memory().percent,
+            "current_activity": self.cluster_mgr.current_activity
+        }
+        item_local = QListWidgetItem(self.node_list)
+        item_local.setSizeHint(QSize(0, 90))
+        widget_local = ClusterNodeRowWidget(self.cluster_mgr.node_id, local_data, is_local=True)
+        self.node_list.addItem(item_local)
+        self.node_list.setItemWidget(item_local, widget_local)
+        
+        # 2. Add Remote Nodes
         for nid, data in self.cluster_mgr._known_nodes.items():
-            self.node_list.addItem(f"{nid} - {data.get('status')} (IP: {data.get('ip')})")
+            if data.get("status") == "Offline (Removed)":
+                continue
+                
+            item = QListWidgetItem(self.node_list)
+            item.setSizeHint(QSize(0, 90))
+            widget = ClusterNodeRowWidget(nid, data, is_local=False)
+            self.node_list.addItem(item)
+            self.node_list.setItemWidget(item, widget)
+
+    def show_transcoder_page(self):
+        """Switches to the Transcoder page (Index 0)."""
+        self.stack.setCurrentIndex(0)
+        # Update sidebar
+        self.btn_home.setChecked(True)
+        self.btn_dash.setChecked(False)
+        self.btn_watch.setChecked(False)
+        self.btn_cluster.setChecked(False)
+        self.btn_settings.setChecked(False)
 
     def show_watch_folder_page(self): # Compatibility or removed
         self.on_nav_clicked(self.btn_watch)
@@ -2735,41 +3673,64 @@ class ModernTranscoderUI(QMainWindow):
 
     def add_watch_folder_ui(self):
         path = QFileDialog.getExistingDirectory(self, "選擇監控資料夾")
-        if path:
-            name, ok = QInputDialog.getText(self, "資料夾名稱", "請輸入識別名稱:")
-            if ok and name:
-                 presets = list(PRESETS.keys())
-                 preset, ok2 = QInputDialog.getItem(self, "選擇轉碼預設", "請選擇該資料夾對應的格式:", presets, 0, False)
-                 if ok2:
-                     current = self.settings.get("watch_folders", [])
-                     current.append({"name": name, "path": path, "preset": preset})
-                     self.settings.set("watch_folders", current)
-                     self.save_settings()
-                     self.show_watch_folder_page()
+        if not path: return
+        
+        # 1. Name first (for convenience)
+        name, ok = QInputDialog.getText(self, "監控任務名稱", "請輸入識別名稱:", QLineEdit.Normal, os.path.basename(path))
+        if not (ok and name): return
+        
+        # 2. Preset Selection (Custom Large List)
+        dlg = PresetSelectorDialog(self)
+        if dlg.exec():
+            preset = dlg.get_selection()
+            if preset:
+                current = self.settings.get("watch_folders", [])
+                current.append({"name": name, "path": path, "preset": preset, "enabled": True})
+                self.settings.set("watch_folders", current)
+                self.save_settings()
+                self.refresh_watch_list_ui()
 
-    def show_cluster_page(self):
-        """Lazy create Cluster Info page."""
-        if not hasattr(self, 'node_list'):
-            self.cluster_page = QWidget()
-            layout = QVBoxLayout(self.cluster_page)
-            
-            title = QLabel("🖥 集群節點狀態 (Cluster Nodes)")
-            title.setStyleSheet("font-size: 20px; font-weight: bold; color: #BB86FC;")
-            layout.addWidget(title)
-            
-            self.node_list = QListWidget()
-            layout.addWidget(self.node_list)
-            
-            lbl_info = QLabel(f"本機辨識碼 (Local Node): {self.cluster_mgr.node_id}")
-            layout.addWidget(lbl_info)
-            
-            self.stack.addWidget(self.cluster_page)
-            
-        self.node_list.clear()
-        for nid, data in self.cluster_mgr._known_nodes.items():
-            self.node_list.addItem(f"{nid} - {data.get('status')} (IP: {data.get('ip')})")
-            
-        self.stack.setCurrentWidget(self.cluster_page)
+    def edit_watch_folder(self, index):
+        """Edits an existing watch folder entry."""
+        watch_folders = self.settings.get("watch_folders", [])
+        if not (0 <= index < len(watch_folders)): return
+        
+        wf = watch_folders[index]
+        
+        # 1. Edit Path
+        path = QFileDialog.getExistingDirectory(self, "更改監控資料夾", wf.get("path"))
+        if not path: return
+        
+        # 2. Edit Name
+        name, ok = QInputDialog.getText(self, "更改監控名稱", "請輸入新名稱:", QLineEdit.Normal, wf.get("name"))
+        if not (ok and name): return
+        
+        # 3. Edit Preset (Custom Large List)
+        dlg = PresetSelectorDialog(self, initial_selection=wf.get("preset"))
+        if dlg.exec():
+            preset = dlg.get_selection()
+            if preset:
+                wf["path"] = path
+                wf["name"] = name
+                wf["preset"] = preset
+                self.settings.set("watch_folders", watch_folders)
+                self.save_settings()
+                self.refresh_watch_list_ui()
+                print(f"Watch Folder {index} updated.")
+
+    def delete_watch_folder(self, index):
+        """Removes a watch folder entry."""
+        watch_folders = self.settings.get("watch_folders", [])
+        if 0 <= index < len(watch_folders):
+            reply = QMessageBox.question(self, "刪除確認", f"確定要移除監控 '{watch_folders[index].get('name')}' 嗎？", 
+                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                watch_folders.pop(index)
+                self.settings.set("watch_folders", watch_folders)
+                self.save_settings()
+                self.refresh_watch_list_ui()
+
+
 
     def update_task_progress(self, widget, percent, text):
         try:
@@ -2777,12 +3738,39 @@ class ModernTranscoderUI(QMainWindow):
 
             if percent == -1: # Indeterminate
                 widget.progress.setRange(0, 0)
-                widget.progress.setStyleSheet("QProgressBar { text-align: center; color: white; background-color: #222; border: 1px solid #333; border-radius: 6px; }") 
+                widget.progress.setStyleSheet("QProgressBar { text-align: center; color: white; background-color: #222; border: none; border-radius: 4px; }") 
             else:
-                widget.progress.setRange(0, 100)
                 widget.progress.setValue(percent)
+                widget.progress.setStyleSheet("""
+                    QProgressBar {
+                        background-color: #333; border: none; border-radius: 4px; height: 14px;
+                        text-align: center; color: white; font-size: 10px; font-weight: bold;
+                    }
+                    QProgressBar::chunk { background-color: #2e7d32; border-radius: 4px; }
+                """)
             if text:
-                widget.lbl_percent.setText(text)
+                widget.progress.setFormat(text) # [MODIFIED] Set text on progress bar
+            
+            # [NEW] Sync Mirror Widget (if exists)
+            task = getattr(widget, 'task_data', {})
+            mirror = task.get("mirror_widget")
+            if mirror:
+                # Sync Progress
+                mirror.progress.setRange(widget.progress.minimum(), widget.progress.maximum())
+                mirror.progress.setValue(widget.progress.value())
+                mirror.progress.setFormat(widget.progress.text())
+                mirror.progress.setStyleSheet(widget.progress.styleSheet())
+                
+                # Sync Status Text & Color
+                mirror.lbl_status.setText(widget.lbl_status.text())
+                mirror.lbl_status.setStyleSheet(widget.lbl_status.styleSheet())
+                
+                # Sync Icons (Approximate: we can just copy state if we had a precise way, 
+                # but manually setting icons for specific states is safer)
+                # We can't easily copy icon pixmaps directly to override logic, 
+                # but we can trigger state updates if we tracked state changes explicitly.
+                # For progress, this is sufficient. Status text covers most.
+                
         except RuntimeError:
             pass # Widget likely deleted
         except Exception as e:
@@ -2800,6 +3788,38 @@ class ModernTranscoderUI(QMainWindow):
             if success:
                self.on_transcode_complete(0, QProcess.NormalExit, task, single_run)
             else:
+               # [NEW] Archive to _ERROR for Automated Tasks
+               source_type = task.get("source_type", "Manual")
+               src_path = task.get("source")
+               if source_type != "Manual" and src_path and os.path.exists(src_path):
+                   try:
+                       src_dir = os.path.dirname(src_path)
+                       err_dir = os.path.join(src_dir, "_ERROR")
+                       if not os.path.exists(err_dir):
+                           os.makedirs(err_dir)
+                           
+                       file_name = os.path.basename(src_path)
+                       dest_path = os.path.join(err_dir, file_name)
+                       
+                       # Collision handling
+                       if os.path.exists(dest_path):
+                            base, ext = os.path.splitext(file_name)
+                            timestamp = time.strftime("%Y%m%d_%H%M%S")
+                            dest_path = os.path.join(err_dir, f"{base}_{timestamp}{ext}")
+                       
+                       # Write Error Log to File
+                       log_path = os.path.splitext(dest_path)[0] + ".log"
+                       try:
+                           with open(log_path, 'w', encoding='utf-8') as lf:
+                               lf.write(msg)
+                       except: 
+                           pass
+                       
+                       print(f"Archiving Failed Source: {src_path} -> {dest_path}")
+                       os.rename(src_path, dest_path)
+                   except Exception as e:
+                       print(f"Error Archive Failed: {e}")
+               
                if getattr(widget, 'lbl_status', None) and widget.lbl_status.text() == "Stopped":
                    pass
                else:
@@ -2807,6 +3827,25 @@ class ModernTranscoderUI(QMainWindow):
                        widget.lbl_status.setText(f"Failed")
                        widget.progress.setValue(0)
                        widget.lbl_status.setStyleSheet("color: #ff5252;")
+                       widget.state = "failed"
+                       widget.last_error_log = msg
+                       widget.btn_transcode.setIcon(widget.create_geometric_icon("refresh", "#E0E0E0", size=24))
+                       widget.btn_transcode.setToolTip("重新轉碼 (Re-Transcode)")
+                       # TRANSITION: Failed tasks also get the X button immediately
+                       widget.btn_cancel.setIcon(widget.create_geometric_icon("close", "#ffffff", size=24))
+                       widget.btn_cancel.setToolTip("移除失敗任務 (Remove)")
+
+                   # [NEW] Sync Mirror Widget on Failure
+                   mirror = task.get("mirror_widget")
+                   if mirror:
+                       mirror.lbl_status.setText(widget.lbl_status.text())
+                       mirror.progress.setValue(0)
+                       mirror.lbl_status.setStyleSheet(widget.lbl_status.styleSheet())
+                       mirror.state = "failed"
+                       mirror.last_error_log = msg
+                       # Sync Icon (Manually set same icon)
+                       mirror.btn_transcode.setIcon(widget.create_geometric_icon("refresh", "#E0E0E0", size=24))
+                       mirror.btn_cancel.setIcon(widget.create_geometric_icon("close", "#ffffff", size=24))
                    print(f"Transcode Failed: {msg}")
                    
                    # [NEW] Intelligent Auto-Retry for Automated Tasks (WatchFolder/Node)
@@ -2819,19 +3858,10 @@ class ModernTranscoderUI(QMainWindow):
                            if widget:
                                widget.lbl_status.setText(f"Retrying ({retries+1})")
                                widget.lbl_status.setStyleSheet("color: #ffa726;")
-                           QTimer.singleShot(3000, lambda: self.start_transcode_task(task, single_run))
+                           QTimer.singleShot(3000, lambda: self.run_transcode(task, single_run))
                            return
 
-                   suggestion, fix_params = self.analyze_error_suggestion(msg)
-                    
-                   if "Task Cancelled" not in msg:
-                       dlg = SmartFailureDialog(msg, suggestion, fix_params, self)
-                       if dlg.exec() and dlg.apply_fix:
-                           # Apply fix to task params
-                           for k, v in fix_params.items():
-                               task[k] = v
-                           # Retry
-                           QTimer.singleShot(500, lambda: self.start_transcode_task(task, single_run))
+                   # Diagnosis moved to Re-transcode button click
             
                # CLEANUP WORKER IN FAILURE PATH
                if widget in self.workers:
@@ -2851,9 +3881,16 @@ class ModernTranscoderUI(QMainWindow):
             # Critical protection: always cleanup worker on error
             if widget in self.workers:
                 worker = self.workers.pop(widget)
+                # [NEW] Clear Activity
+                self.cluster_mgr.set_local_activity("Idle")
+                self.cluster_mgr.sync()
                 worker.deleteLater()
             self.is_processing = False
             self.process_next_task()
+        
+        # [FIX] Ensure activity is cleared on success too (moved from inner scope)
+        self.cluster_mgr.set_local_activity("Idle")
+        self.cluster_mgr.sync()
            
     def analyze_error_suggestion(self, log_output):
         """Analyzes FFmpeg log to provide actionable fixes."""
@@ -2874,13 +3911,29 @@ class ModernTranscoderUI(QMainWindow):
              return ("封裝參數錯誤。這通常是因為編碼組合或位元率不被該容器支援。\n\n💡 建議：切換為通用的 H.264 + MP4 組合重試。", 
                      {"container": "mp4", "vcodec": "libx264", "acodec": "aac"})
 
+        # 4. MPEG Container Audio Codec mismatch (The error in log)
+        if "mpeg" in log_lower and "unsupported audio codec" in log_lower:
+             return ("MPEG 封裝格式不支援目前選取的音訊編碼 (如 AAC)。\n\n💡 建議：自動將音訊改為 MPEG 支援的 AC3 或 MP2 編碼以確保相容性。", 
+                     {"acodec": "ac3"})
+
         if "permission denied" in log_lower:
              return ("輸出目錄無寫入權限，或磁碟空間不足。\n\n💡 請檢查目標資料夾權限。", None)
 
         if "unknown codec" in log_lower:
              return ("來源檔編碼無法識別，這常見於損壞的素材。\n\n💡 建議：使用主介面的 [重新解碼 (Re-Decode)] 按鈕嘗試修復。", None)
+
+        if "invalid argument" in log_lower or "error splitting the argument list" in log_lower:
+             return ("參數傳遞錯誤 (Invalid Argument)。這通常發生在路徑包含特殊字元、括號，或某些轉碼參數超出了編碼器限制。\n\n💡 建議方案：嘗試簡化輸出檔名，並套用 [相容模式]。" ,
+                     {"container": "mp4", "vcodec": "libx264", "acodec": "aac"})
+
+        if "error initializing output stream" in log_lower or "codec initialization failed" in log_lower:
+             return ("編碼器初始化失敗。這可能是因為選定的硬體加速器 (如 NVENC/QSV) 正在被其他程式佔用，或來源解析度超出了硬體限制。\n\n💡 建議方案：將編碼器切換為相容性最高的 CPU 軟體編碼 (libx264)。",
+                     {"vcodec": "libx264"})
             
-        return ("未知錯誤。建議檢查輸出路徑是否正確，或更換輸出容器 (如 MP4) 再試一次。", None)
+        # 5. Default "Safety Mode" Suggestion
+        # If we can't find a specific error, offer a force-compatibility fix instead of nothing.
+        return ("雖然無法定位具體成因，但這類錯誤通常與路徑中的特殊字元或不相容的編碼參數有關。\n\n💡 建議方案：套用 [相容模式 (Safety Fix)]，將容器強制設為 MP4 並使用標準 H.264 編碼再次嘗試。", 
+                {"container": "mp4", "vcodec": "libx264", "acodec": "aac"})
 
     def on_transcode_complete(self, exit_code, exit_status, task, single_run):
         try:
@@ -2913,6 +3966,52 @@ class ModernTranscoderUI(QMainWindow):
                         QProgressBar::chunk { background-color: #00c853; border-radius: 5px; }
                     """)
                     widget.set_done(output_path, self.player, speed_text)
+                
+                # [NEW] Sync Mirror Widget on Success
+                mirror = task.get("mirror_widget")
+                if mirror:
+                    mirror.progress.setRange(0, 100)
+                    mirror.progress.setValue(100)
+                    mirror.progress.setStyleSheet(widget.progress.styleSheet())
+                    mirror.set_done(output_path, self.player, speed_text)
+                    
+                # [NEW] Auto-Archive Source File (Watch Folder / Automation Only)
+                # Requirement: Move completed task source to _DONE or _ERROR
+                source_type = task.get("source_type", "Manual")
+                src_path = task.get("source")
+                
+                if source_type != "Manual" and src_path and os.path.exists(src_path):
+                     try:
+                         src_dir = os.path.dirname(src_path)
+                         done_dir = os.path.join(src_dir, "_DONE")
+                         
+                         if not os.path.exists(done_dir):
+                             os.makedirs(done_dir)
+                             
+                         file_name = os.path.basename(src_path)
+                         dest_path = os.path.join(done_dir, file_name)
+                         
+                         # Collision handling
+                         if os.path.exists(dest_path):
+                             base, ext = os.path.splitext(file_name)
+                             timestamp = time.strftime("%Y%m%d_%H%M%S")
+                             dest_path = os.path.join(done_dir, f"{base}_{timestamp}{ext}")
+                             
+                         print(f"Archiving Source: {src_path} -> {dest_path}")
+                         
+                         # Ensure we release any locks? 
+                         # FFmpeg is done (process terminated), so lock should be free.
+                         try:
+                             os.rename(src_path, dest_path)
+                             print("Source archived successfully.")
+                         except OSError as move_err:
+                             print(f"Archive Failed (OS): {move_err}")
+                             # Try shutil verify
+                             import shutil
+                             shutil.move(src_path, dest_path)
+                             
+                     except Exception as archive_e:
+                         print(f"Auto-Archive Error: {archive_e}")
             
             # SAFE CLEANUP: Remove worker from dict AFTER UI updates are finished
             if widget in self.workers:
@@ -2932,7 +4031,6 @@ class ModernTranscoderUI(QMainWindow):
                     worker.deleteLater() # Safely schedule deletion
                 except Exception as cleanup_err:
                     print(f"Cleanup Warning: {cleanup_err}")
-            
             # Reset current task ref
             if getattr(self, 'current_running_task', None) == task:
                 self.current_running_task = None
@@ -2940,9 +4038,12 @@ class ModernTranscoderUI(QMainWindow):
             if not single_run:
                 self.process_next_task()
             else:
-                self.is_processing = False
-                if self.pending_tasks:
-                    self.btn_start_all.setEnabled(True)
+                # If single task finished, check if we can fill slots from queue
+                # if we were in "Start All" mode before.
+                if self.is_processing:
+                    self.process_next_task()
+                elif not self.workers:
+                     self.btn_start_all.setEnabled(True)
         except Exception as e:
             debug_log(f"on_transcode_complete Error: {e}\n{traceback.format_exc()}")
             if not single_run: self.process_next_task()
@@ -3023,23 +4124,36 @@ class ModernTranscoderUI(QMainWindow):
 
     def save_pending_tasks(self):
         to_save = []
-        count = self.task_list.count()
-        count = self.task_list.count()
         keys_to_save = ["source", "in_point", "out_point", "base_name", "output_dir", "sequence", "bitrate", "container", "vcodec", "acodec", "audio_gain", "resolution", "fps", "audio_ch"]
         
-        for i in range(count):
-             item = self.task_list.item(i)
-             widget = self.task_list.itemWidget(item)
-             if widget and widget.task_data:
-                 status = widget.lbl_status.text()
-                 if status != "Done":
-                      # Safe Whitelist Copy to prevent JSON Error
-                      safe_data = {}
-                      for k in keys_to_save:
+        # Save from BOTH lists
+        def collect_from_list(list_widget, skip_manual_mirrors=False):
+            c = list_widget.count()
+            for i in range(c):
+                 item = list_widget.item(i)
+                 widget = list_widget.itemWidget(item)
+                 if widget and widget.task_data:
+                     status = widget.lbl_status.text()
+                     
+                     # Requirement: Clear Completed (Done) tasks on startup
+                     if "Done" in status:
+                         continue
+                         
+                     # [FIX] Do NOT save Manual Mirrors from Auto List (Duplicate Prevention)
+                     s_type = widget.task_data.get("source_type", "Manual")
+                     if skip_manual_mirrors and s_type == "Manual":
+                         continue
+                         
+                     safe_data = {}
+                     for k in keys_to_save:
                           if k in widget.task_data:
                               safe_data[k] = widget.task_data[k]
-                      to_save.append(safe_data)
-        
+                      
+                     safe_data["source_type"] = s_type
+                     to_save.append(safe_data)
+
+        collect_from_list(self.manual_task_list, skip_manual_mirrors=False)
+        collect_from_list(self.auto_task_list, skip_manual_mirrors=True) # Skip mirrors here        
         try:
             self.settings.set("saved_queue", to_save)
             self.settings.save()  # Force immediate save
@@ -3055,6 +4169,165 @@ class ModernTranscoderUI(QMainWindow):
         except Exception as e:
             print(f"Auto-save error: {e}")
 
+    def refresh_dashboard_from_snapshot(self):
+        """
+        Populates the Dashboard (Auto Task List) based on File System Snapshot.
+        Source of Truth: Watch Folder Directories (Pending, _DONE, _ERROR)
+        Preserves Running Tasks to prevent UI interruption.
+        """
+        # 1. Get Snapshot
+        if not hasattr(self, 'watch_engine'): return
+        
+        snapshot = self.watch_engine.scan_status_snapshot()
+        
+        # 2. Identify Running Tasks & Manual Mirrors
+        running_widgets = []
+        running_paths = set()
+        
+        # We need to manage the list carefully.
+        # Strategy: 
+        # 1. Collect all items.
+        # 2. If 'Running' (in self.workers), keep.
+        # 3. If 'Manual Mirror', keep (and update?).
+        # 4. Others -> Remove.
+        # 5. Add new from Snapshot.
+        
+        items_to_remove = []
+        existing_paths = {} # path -> widget
+        
+        count = self.auto_task_list.count()
+        for i in range(count):
+            item = self.auto_task_list.item(i)
+            widget = self.auto_task_list.itemWidget(item)
+            if not widget: 
+                items_to_remove.append(item)
+                continue
+                
+            task_data = getattr(widget, 'task_data', {})
+            src = task_data.get("source")
+            is_running = widget in self.workers
+            is_mirror = task_data.get("source_type") == "Manual"
+            
+            if is_running:
+                running_widgets.append(widget)
+                if src: running_paths.add(src)
+                existing_paths[src] = widget
+            elif is_mirror:
+                # We can remove and let the "Restore Manual" logic re-add/update it 
+                # to ensure it's in sync with manual list?
+                # Actually, simpler to remove and rebuild mirrors.
+                items_to_remove.append(item)
+            else:
+                # Standard auto task (Pending/Done/Failed)
+                # We will replace these with the Truth from Snapshot
+                items_to_remove.append(item)
+
+        # Remove "stale" items (excluding running)
+        for item in items_to_remove:
+            # Safely remove
+            # Note: takeItem removes from list, doesn't delete widget immediately unless parentless
+            row = self.auto_task_list.row(item)
+            self.auto_task_list.takeItem(row) 
+            # item defines ownership? QListWidget deletes items.
+            # Python GC handles widget if no ref.
+            
+        # 3. Restore Manual Mirrors (Always Fresh)
+        count = self.manual_task_list.count()
+        for i in range(count):
+            item = self.manual_task_list.item(i)
+            widget = self.manual_task_list.itemWidget(item)
+            if widget and widget.task_data:
+                # Check if we already have a mirror? (We removed them all above)
+                task = widget.task_data
+                item_mirror = QListWidgetItem(self.auto_task_list)
+                item_mirror.setSizeHint(QSize(0, 36))
+                
+                status_text = widget.lbl_status.text()
+                widget_mirror = TaskProgressWidget(f"[手動鏡像] {task.get('base_name')}")
+                widget_mirror.setStyleSheet("QFrame#TaskRow { background-color: #2b2b2b; } QLabel { color: #e0e0e0; font-style: italic; }")
+                widget_mirror.set_task_data(task)
+                widget_mirror.lbl_status.setText(status_text)
+                widget_mirror.progress.setValue(widget.progress.value())
+                widget_mirror.progress.setStyleSheet(widget.progress.styleSheet())
+                
+                # Sync Actions
+                widget_mirror.transcode_requested.connect(lambda w=widget: self.transcode_single_item(w))
+                widget_mirror.pause_requested.connect(lambda w=widget: self.pause_task(w))
+                widget_mirror.resume_requested.connect(lambda w=widget: self.resume_task(w))
+                widget_mirror.stop_requested.connect(lambda w=widget: self.stop_current_task(w))
+                widget_mirror.removed.connect(lambda w=widget: self.remove_task_by_widget(w))
+                
+                self.auto_task_list.addItem(item_mirror)
+                self.auto_task_list.setItemWidget(item_mirror, widget_mirror)
+                task["mirror_widget"] = widget_mirror
+
+        # 4. Add Snapshot Items
+        # Skip if path is in running_paths
+        
+        def add_snapshot_item(item, category):
+            path = item['path']
+            if path in running_paths: return # Skip running
+            
+            # [FIX] Final Ghost Task Prevention: Verify Existence
+            if not os.path.exists(path):
+                return
+                
+            # Create Widget
+            w_item = QListWidgetItem(self.auto_task_list)
+            w_item.setSizeHint(QSize(0, 36))
+            
+            if category == 'pending':
+                widget = TaskProgressWidget(f"[待轉] {item['base_name']}")
+                widget.setStyleSheet("QFrame#TaskRow { background-color: #203020; } QLabel { color: #cfd8dc; }")
+                widget.lbl_status.setText("Pending")
+            elif category == 'done':
+                widget = TaskProgressWidget(f"[完成] {item['base_name']}")
+                widget.progress.setRange(0, 100)
+                widget.progress.setValue(100)
+                widget.progress.setStyleSheet("QProgressBar { background-color: #222; border: 1px solid #444; border-radius: 4px; } QProgressBar::chunk { background-color: #4CAF50; }")
+                widget.lbl_status.setText("Done")
+                widget.lbl_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
+                widget.set_done(path, self.player, "Done")
+            elif category == 'error':
+                 widget = TaskProgressWidget(f"[錯誤] {item['base_name']}")
+                 widget.setStyleSheet("QFrame#TaskRow { background-color: #302020; } QLabel { color: #ff8a80; }")
+                 widget.lbl_status.setText("Failed")
+                 widget.progress.setValue(100)
+                 widget.progress.setStyleSheet("QProgressBar::chunk { background-color: #d32f2f; }")
+                 widget.setToolTip(item.get("log_content", "Error"))
+
+            # Common Setup
+            task_data = {
+                "source": path,
+                "base_name": item['base_name'],
+                "source_type": "WatchFolder", # Ensure correct type
+                "worker_id": "Auto",
+                "status": "Pending" if category == 'pending' else category.capitalize(),
+                "progress": 0 if category == 'pending' else 100
+            }
+            widget.set_task_data(task_data)
+            
+            # Connect Signals
+            widget.transcode_requested.connect(lambda w=widget: self.transcode_single_item(w))
+            widget.pause_requested.connect(lambda w=widget: self.pause_task(w))
+            widget.resume_requested.connect(lambda w=widget: self.resume_task(w))
+            widget.stop_requested.connect(lambda w=widget: self.stop_current_task(w))
+            widget.removed.connect(lambda w=widget: self.remove_task_by_widget(w))
+            widget.switch_page_requested.connect(self.show_transcoder_page)
+            
+            self.auto_task_list.addItem(w_item)
+            self.auto_task_list.setItemWidget(w_item, widget)
+            
+            # Use existing logic for set_done if needed (already called above)
+            
+        for x in snapshot['pending']: add_snapshot_item(x, 'pending')
+        for x in snapshot['done']: add_snapshot_item(x, 'done')
+        for x in snapshot['error']: add_snapshot_item(x, 'error')
+        
+        # [NEW] Trigger Queue Pump for any new Pending items
+        if snapshot['pending']:
+             self.process_next_task()
+
     def load_pending_tasks(self):
         saved = self.settings.get("saved_queue", [])
         if not saved: return
@@ -3066,22 +4339,32 @@ class ModernTranscoderUI(QMainWindow):
              
              final_base = task_data["base_name"]
              
-             item = QListWidgetItem(self.task_list)
+             # [ROUTING] Select List Widget based on Source Type
+             source_type = task_data.get("source_type", "Manual")
+             
+             # [FIX] Only restore specific Manual tasks from settings.
+             # Auto tasks (WatchFolder, Mirrors) are restored via refresh_dashboard_from_snapshot (FS Sync).
+             if source_type != "Manual": 
+                 continue
+                 
+             target_list = self.manual_task_list
+             
+             item = QListWidgetItem(target_list)
              item.setSizeHint(QSize(0, 36))
              widget = TaskProgressWidget(final_base)
              # Restore source and worker for saved tasks
-             task_data["source_type"] = task_data.get("source_type", "Manual")
+             task_data["source_type"] = source_type
              task_data["worker_id"] = task_data.get("worker_id", "-")
              widget.set_task_data(task_data) 
              widget.lbl_status.setText("Pending")
              widget.removed.connect(self.remove_task_by_widget)
              widget.transcode_requested.connect(self.transcode_single_item)
-             widget.pause_requested.connect(self.pause_task)
              widget.resume_requested.connect(self.resume_task)
              widget.stop_requested.connect(self.stop_current_task)
+             widget.switch_page_requested.connect(self.show_transcoder_page) # [NEW] Switch to Player Page
              
-             self.task_list.addItem(item)
-             self.task_list.setItemWidget(item, widget)
+             target_list.addItem(item)
+             target_list.setItemWidget(item, widget)
              task_data["widget"] = widget
              self.pending_tasks.append(task_data)
              
@@ -3143,7 +4426,7 @@ class ModernTranscoderUI(QMainWindow):
 
     def on_watch_folder_detected(self, file_path, folder_name):
         """Handler for automated folder monitoring detections."""
-        print(f"WatchFolder Trigger: {file_path} from {folder_name}")
+        print(f"WatchFolder Trigger: Received Signal for {file_path}")
         
         # Find preset for this folder
         watch_folders = self.settings.get("watch_folders", [])
@@ -3153,6 +4436,7 @@ class ModernTranscoderUI(QMainWindow):
                 preset_name = wf.get("preset")
                 break
         
+        print(f"WatchFolder Trigger: Adding Task. Preset={preset_name}")
         # Add to queue automatically
         self.add_task_to_queue(
             source_path=file_path, 
@@ -3162,34 +4446,139 @@ class ModernTranscoderUI(QMainWindow):
             preset_name=preset_name
         )
         
-        # Start immediately if no other task is running? 
-        # For now, let user press "Start All" or just pend it.
-        # Requirement says "啟動轉碼" (Launch Transcode)
-        QTimer.singleShot(500, self.start_transcode_all)
+        # Start immediately
+        print("WatchFolder Trigger: Launching Transcode Queue...")
+        QTimer.singleShot(500, self.start_transcoding_queue)
 
     def on_cluster_task_synced(self, task_data):
         """Handler for tasks broadcasted by other nodes."""
-        # Prevent duplicates
-        for t in self.pending_tasks:
-            if t.get("base_name") == task_data.get("base_name") and t.get("node_origin") == task_data.get("node_origin"):
-                return
+        # Check if task already exists
+        base_name = task_data.get("base_name")
+        origin = task_data.get("node_origin")
         
-        print(f"Cluster: New Task from {task_data.get('node_origin')}")
+        existing_task = None
+        for t in self.pending_tasks:
+            if t.get("base_name") == base_name and t.get("node_origin") == origin:
+                existing_task = t
+                break
+                
+        if existing_task:
+            # Update Existing Task
+            # Sync key fields: status, progress, speed, etc.
+            if "status" in task_data: existing_task["status"] = task_data["status"]
+            if "progress" in task_data: existing_task["progress"] = task_data["progress"]
+            
+            # Update UI Widget
+            widget = existing_task.get("widget")
+            if widget:
+                # Sync Status Label
+                status_text = task_data.get("status", "Pending")
+                widget.lbl_status.setText(status_text)
+                
+                # Sync Progress Bar
+                prog_val = task_data.get("progress", 0)
+                if isinstance(prog_val, int):
+                    widget.progress.setValue(prog_val)
+                    
+                # Visual Styles for Done/Failed
+                if status_text == "Done":
+                    widget.lbl_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
+                    widget.progress.setStyleSheet("QProgressBar::chunk { background-color: #4CAF50; }")
+                elif status_text == "Failed":
+                    widget.lbl_status.setStyleSheet("color: #F44336; font-weight: bold;")
+                    widget.progress.setStyleSheet("QProgressBar::chunk { background-color: #d32f2f; }")
+                    
+            return
+
+        # New Task - verification
+        source_path = task_data.get("source")
+        
+        # [FIX] Enhanced Ghost Task Filtering
+        # 1. Check if we deleted it locally this session
+        task_base = task_data.get("base_name")
+        b_time = task_data.get("broadcast_time", "0")
+        unique_key = f"{task_base}|{b_time}"
+        
+        # Debug Filter Logic
+        # print(f"DEBUG: Cluster Filter Check -> Key: {unique_key} | In Deleted? {unique_key in self.deleted_cluster_tasks}")
+        
+        # Check both composite key (precise) and legacy plain name (broad)
+        if unique_key in self.deleted_cluster_tasks or task_base in self.deleted_cluster_tasks:
+            debug_log(f"Cluster: Ignored deleted task: {unique_key}")
+            return
+
+        # 2. Check Local Ownership (Watch Folder)
+        # 1. Existence Check: If file deleted locally, trust local state
+        if source_path and not os.path.exists(source_path):
+            # Allow network paths if they are reachable, but if locally unreachable, skip
+            debug_log(f"Cluster: Ignoring Task (File Not Found): {source_path}")
+            return
+
+        # 2. Ownership Check: If file is in one of OUR Watch Folders, ignore Cluster
+        # Because we (Master) should detect it via WatchEngine, not Cluster Sync.
+        # This prevents "loopback" tasks.
+        try:
+            watch_folders = self.settings.get("watch_folders", [])
+            norm_source = os.path.normpath(source_path).lower() if source_path else ""
+            for wf in watch_folders:
+                wf_path = wf.get("path")
+                if wf_path:
+                    norm_wf = os.path.normpath(wf_path).lower()
+                    if norm_source.startswith(norm_wf):
+                        debug_log(f"Cluster: Ignoring Task (Local Ownership): {source_path}")
+                        return
+        except: pass
+
+        # 3. Hostname Check (already in ClusterManager, but double safety here)
+        # Passed -> Add to Queue
+        print(f"Cluster: New Task from {origin}")
         self.add_task_to_queue(
-            source_path=task_data.get("source"),
+            source_path=source_path,
             full_duration=True,
-            source_type=f"Node:{task_data.get('node_origin')}",
-            worker_id="Cluster"
+            source_type=f"Node:{origin}", # Correct routing to Dashboard
+            worker_id="Cluster",
+            base_name_override=task_base, # Preserve exact name
+            extra_data={
+                "broadcast_time": b_time,
+                "node_origin": origin
+            }
         )
 
     def on_cluster_node_updated(self, node_data):
         """Update cluster node status in the Dashboard (e.g. status bar)."""
         node_id = node_data.get("node_id")
-        status = node_data.get("status")
-        # For now, just a debug log, could be a list in a side panel later
-        print(f"Cluster Node Update: {node_id} is {status}")
+        status = node_data.get("status", "")
+        
+        # Search for existing row
+        found_item = None
+        found_widget = None
+        for i in range(self.node_list.count()):
+            item = self.node_list.item(i)
+            widget = self.node_list.itemWidget(item)
+            if getattr(widget, 'node_id', '') == node_id:
+                found_item = item
+                found_widget = widget
+                break
+
+        # Case 1: Node Removed -> Delete Row from List
+        if status == "Offline (Removed)":
+            if found_item:
+                row = self.node_list.row(found_item)
+                self.node_list.takeItem(row)
+                # Cleanup widget? Python GC should handle it, but can explicit delete if needed.
+            return # Done
+
+        # Case 2: Update Existing
+        if found_widget:
+            found_widget.update_state(node_data)
+        else:
+            # Case 3: New Node -> Refresh whole list (simplest for now)
+            # Only add if NOT removed status (edge case)
+            if status != "Offline (Removed)":
+                self.refresh_cluster_ui()
+            
         if hasattr(self, 'statusBar'):
-            self.statusBar().showMessage(f"Cluster: node {node_id} is {status}", 3000)
+            self.statusBar().showMessage(f"Cluster: node {node_id} active", 1000)
 
     def closeEvent(self, event):
         """Standardized clean shutdown to prevent QThread crashes on exit."""
@@ -3213,6 +4602,11 @@ class ModernTranscoderUI(QMainWindow):
                         worker.deleteLater()
                     except: pass
                 self.workers.clear()
+            
+            # 4. Stop Watch Engine
+            if hasattr(self, 'watch_engine'):
+                self.watch_engine.stop()
+                self.watch_engine.wait(2000)
             
         except Exception as e:
             print(f"Error during shutdown: {e}")
@@ -3240,3 +4634,14 @@ class ModernTranscoderUI(QMainWindow):
             print("Requesting Stop...")
             self.workers[widget].stop()
 
+    def toggle_watch_folder(self, index, new_state):
+        watch_folders = self.settings.get("watch_folders", [])
+        if 0 <= index < len(watch_folders):
+            watch_folders[index]["enabled"] = new_state
+            self.settings.set("watch_folders", watch_folders)
+            self.save_settings()
+            
+            # Refresh specific row or whole list? simple refresh whole list
+            self.refresh_watch_list_ui()
+            
+            # Engine handles the "enabled" flag dynamically in its loop

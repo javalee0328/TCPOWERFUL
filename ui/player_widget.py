@@ -403,7 +403,7 @@ class VideoPlayerWidget(QWidget):
         # Timer for floating label update during playback
         self.float_timer = QTimer(self)
         self.float_timer.timeout.connect(self.update_floating_time)
-        self.float_timer.start(50)
+        # self.float_timer.start(50) # [DISABLED] Only update on drag
         
         self._thread_pool = [] # Zombie thread keeper
 
@@ -637,6 +637,11 @@ class VideoPlayerWidget(QWidget):
         self.vu_offset_ms = 120 # Reduced for tighter response
 
     def update_floating_time(self):
+        # [MODIFIED] Only show if slider is being dragged
+        if not self.slider.isSliderDown():
+            self.lbl_float_time.hide()
+            return
+
         if self.slider.isVisible():
             val = self.slider.value()
             self.lbl_float_time.setText(self.format_time(val))
@@ -659,7 +664,7 @@ class VideoPlayerWidget(QWidget):
             
             self.lbl_float_time.move(lbl_x, lbl_y)
             if not self.lbl_float_time.isVisible():
-                self.lbl_float_time.show()
+                 self.lbl_float_time.show()
 
     def get_btn_style(self, variant="transparent"):
         if variant == "filled_close":

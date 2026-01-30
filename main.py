@@ -60,11 +60,10 @@ if __name__ == "__main__":
         # Already exists!
         msg = QMessageBox()
         msg.setWindowTitle("ProTranscoder 2026")
-        msg.setText("已運行")
-        msg.setInformativeText("要重新開啟程式？")
-        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        msg.setDefaultButton(QMessageBox.No)
-        msg.setIcon(QMessageBox.Question)
+        msg.setText("程式已在運行中 (Already Running)")
+        msg.setInformativeText("請切換至已開啟的視窗。\nPlease switch to the existing window.")
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.setIcon(QMessageBox.Warning)
         
         # Force the message box to be top-most to ensure visibility
         msg.setWindowFlags(msg.windowFlags() | Qt.WindowStaysOnTopHint)
@@ -72,9 +71,8 @@ if __name__ == "__main__":
         # Dark mode text fix
         msg.setStyleSheet("QLabel { color: #000; }") 
         
-        ret = msg.exec()
-        if ret == QMessageBox.No:
-            sys.exit(0)
+        msg.exec()
+        sys.exit(0)
     
     import traceback
     

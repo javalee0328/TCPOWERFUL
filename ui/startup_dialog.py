@@ -10,7 +10,7 @@ class StartupCheckDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("金碼湛 ProTranscoder 2026")
-        self.setFixedSize(600, 320)  # Reduced height: 400 → 320
+        self.setFixedSize(450, 320)  # Narrower width: 600 -> 450, Height: 320
         self.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
         
         # Enable transparency for glassmorphism
@@ -26,7 +26,8 @@ class StartupCheckDialog(QDialog):
         
         # Main container with glassmorphism effect
         container = QWidget(self)
-        container.setGeometry(0, 0, 600, 320)  # Reduced height
+        container.setGeometry(0, 0, 450, 320)  # Adjusted width to 450
+
         container.setStyleSheet("""
             QWidget {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -93,7 +94,7 @@ class StartupCheckDialog(QDialog):
         self.lbl_status = QLabel()
         self.lbl_status.setAlignment(Qt.AlignCenter)
         self.lbl_status.setStyleSheet("""
-            font-size: 13px; 
+            font-size: 16px; 
             color: #000000;
             background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FFD700, stop:1 #FFA500);
             border: 2px solid #B8860B;

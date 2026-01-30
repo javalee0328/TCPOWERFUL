@@ -60,8 +60,28 @@ def get_best_hevc_encoder(available):
         return "hevc_amf"
     return "libx265"
 
+def get_recommended_concurrency():
+    """
+    Suggests the number of simultaneous transcode tasks based on CPU and GPU info.
+    """
+    gpu = get_gpu_encoders()
+    cpu_count = os.cpu_count() or 4
+    
+    # Priority 1: NVIDIA GPU (NVENC usually handles 3-5 sessions on consumer cards, more on Pro)
+    if gpu["nvenc"]:
+        return 3
+    
+    # Priority 2: QSV or AMF (Typically stable with 2 simultaneous tasks)
+    if gpu["qsv"] or gpu["amf"]:
+        return 2
+        
+    # Priority 3: CPU Only
+    # Standard rule: 1 task per 4 logical cores for HD transcoding
+    return max(1, cpu_count // 4)
+
 if __name__ == "__main__":
     print("Detecting hardware acceleration...")
     gpu_list = get_gpu_encoders()
     print(f"Available HW Encoders: {gpu_list}")
     print(f"Recommended H.264: {get_best_h264_encoder(gpu_list)}")
+    print(f"Recommended Concurrency: {get_recommended_concurrency()}")
