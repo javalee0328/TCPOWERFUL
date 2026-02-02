@@ -10,6 +10,7 @@ class WatchFolderEngine(QThread):
     Runs in a separate thread to prevent UI blocking.
     """
     file_detected = Signal(str, str) # file_path, folder_name
+    snapshot_ready = Signal(dict) # [NEW] Signal for async dashboard data
 
     def __init__(self, settings_manager, parent=None):
         super().__init__(parent)
@@ -17,6 +18,11 @@ class WatchFolderEngine(QThread):
         self.processed_db_path = os.path.join(os.getcwd(), "watch_folder_history.json")
         self.processed_files = self.load_history()
         self.is_running = False
+        self._snapshot_requested = False # Flag for async request
+
+    def request_snapshot(self):
+        """Thread-safe request for a snapshot."""
+        self._snapshot_requested = True
 
     def load_history(self):
         if os.path.exists(self.processed_db_path):
@@ -45,12 +51,19 @@ class WatchFolderEngine(QThread):
         while self.is_running:
             try:
                 self.scan()
+                
+                # [NEW] Check for One-Off Snapshot Request
+                if self._snapshot_requested:
+                    self._snapshot_requested = False
+                    data = self.scan_status_snapshot()
+                    self.snapshot_ready.emit(data)
+                    
             except Exception as e:
                 print(f"WatchFolderEngine Thread Error: {e}")
             
             # Sleep in intervals for responsiveness to stop signals
             for _ in range(50): # 5 seconds total
-                if not self.is_running: break
+                if not self.is_running or self._snapshot_requested: break
                 time.sleep(0.1)
 
     def scan(self):
@@ -77,6 +90,13 @@ class WatchFolderEngine(QThread):
                     if not self.is_running: return
                     
                     file_path = os.path.normpath(os.path.join(path, filename))
+                    
+                    # [FIX] Skip special directories (_DONE, _ERROR, _TEMP)
+                    if os.path.isdir(file_path):
+                        dir_name = os.path.basename(file_path)
+                        if dir_name in ["_DONE", "_ERROR", "_TEMP"]:
+                            continue
+                    
                     if not os.path.isfile(file_path):
                         continue
                     

@@ -1,5 +1,8 @@
 import sys
 import os
+import PySide6.QtMultimedia
+import PySide6.QtMultimediaWidgets
+import PySide6.QtNetwork
 
 # Ensure project root is in path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -24,9 +27,12 @@ if __name__ == "__main__":
         app.setWindowIcon(QIcon(icon_path))
     
     # --- Single Instance Check (Triple-Lock: Mutex + LockFile + SharedMem) ---
+    # [DISABLED] Single Instance Check - User requested to allow multiple instances
+    # Keeping the code commented for reference
+    """
     import ctypes
     from PySide6.QtWidgets import QMessageBox
-    from PySide6.QtCore import Qt, QLockFile, QDir, QSharedMemory, QTimer
+    from PySide6.QtCore import Qt, QLockFile, QDir, QSharedMemory
     
     # 1. Mutex Check (Primary for Windows)
     MUTEX_NAME = "ProTranscoder_Single_Instance_Mutex"
@@ -42,26 +48,50 @@ if __name__ == "__main__":
     ERROR_ALREADY_EXISTS = 183
     is_running = (last_error == ERROR_ALREADY_EXISTS)
 
-    # 2. LockFile Check (Backup)
+    # 2. LockFile Check (Backup) with Stale Lock Cleanup
     # Bind to app to ensure lifetime
     app._lock_file = QLockFile(QDir.temp().filePath("ProTranscoder.lock"))
+    app._lock_file.setStaleLockTime(30000)  # 30 seconds stale timeout
+    
     if not is_running: 
         if not app._lock_file.tryLock(100):
-            is_running = True
+            # 鎖定失敗，嘗試清理過期鎖
+            print("DEBUG: Lock file locked, attempting to remove stale lock...")
+            if app._lock_file.removeStaleLockFile():
+                print("DEBUG: Stale lock removed, retrying...")
+                # 重試一次
+                if not app._lock_file.tryLock(100):
+                    is_running = True
+                    print("DEBUG: Still locked after stale removal, another instance is running.")
+                else:
+                    print("DEBUG: Lock acquired after stale removal.")
+            else:
+                # 無法清理過期鎖，可能真的有其他實例
+                is_running = True
+                print("DEBUG: Could not remove stale lock, assuming running.")
             
-    # 3. Shared Memory Check (Final Fallback)
+    # 3. Shared Memory Check (Final Fallback) - More lenient
     app._shared_mem = QSharedMemory("ProTranscoder_SharedMem_Key")
     if not is_running:
         if not app._shared_mem.create(1): # Try to create 1 byte
-            # Creation failed, means it exists
-            is_running = True
+            # Creation failed, try to attach to verify it's real
+            print("DEBUG: Shared memory exists, attempting to attach...")
+            if app._shared_mem.attach():
+                # Successfully attached, another instance is really running
+                is_running = True
+                app._shared_mem.detach()
+                print("DEBUG: Successfully attached to shared memory, another instance confirmed.")
+            else:
+                # Can't attach, might be stale, ignore this check
+                print("DEBUG: Could not attach to shared memory, assuming stale entry, ignoring.")
+                pass
     
     if is_running:
         # Already exists!
         msg = QMessageBox()
         msg.setWindowTitle("ProTranscoder 2026")
         msg.setText("程式已在運行中 (Already Running)")
-        msg.setInformativeText("請切換至已開啟的視窗。\nPlease switch to the existing window.")
+        msg.setInformativeText("請切換至已開啟的視窗。\\nPlease switch to the existing window.")
         msg.setStandardButtons(QMessageBox.Ok)
         msg.setIcon(QMessageBox.Warning)
         
@@ -73,6 +103,10 @@ if __name__ == "__main__":
         
         msg.exec()
         sys.exit(0)
+    """
+    
+    # Import required modules
+    from PySide6.QtCore import QTimer
     
     import traceback
     

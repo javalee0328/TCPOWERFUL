@@ -5,46 +5,64 @@ import datetime
 import time
 from PySide6.QtCore import QObject, QTimer, Signal
 import psutil
+from core.settings import CURRENT_VERSION
 
-class ClusterManager(QObject):
+class ClusterWorker(QObject):
     """
-    Manages task synchronization and node heart beat for the Transcoder Cluster.
-    Uses a shared network path for coordination, enabling multi-node collaboration
-    without a central server.
+    Background worker for ClusterManager to prevent UI freezes due to slow Network IO.
     """
-    task_synced = Signal(dict) # Triggered when a foreign task is discovered or updated
-    node_updated = Signal(dict) # Triggered when a cluster node heartbeat is received
+    task_synced = Signal(dict)
+    node_updated = Signal(dict)
+    watch_config_synced = Signal(list) # [NEW] Signal for synced watch folders
+    finished = Signal()
 
-    def __init__(self, settings_manager, parent=None):
-        super().__init__(parent)
-        self.settings = settings_manager
-        # [FIX] Unique ID for multiple instances on same machine (Hostname + PID)
-        self.node_id = f"{socket.gethostname()}-{os.getpid()}"
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.sync)
-        self.is_running = False
-        
-        # Sync Cache
+    def __init__(self, cluster_path, node_id, settings_dict):
+        super().__init__()
+        self._cluster_path = cluster_path
+        self.node_id = node_id
+        # We pass a dict copy of settings to avoid thread safety issues with SettingsManager
+        self.settings = settings_dict 
+        self.lock = None # Will be set for thread safety if needed, but dict.update is mostly atomic
+        self.running = True
         self._known_tasks = {}
         self._known_nodes = {}
-        
-        # Activity Tracking
-        self.current_activity = "Idle" 
+        self.current_activity = "Idle"
+        self.active_task_count = 0 # [NEW] Track count for load balancing
+        self.total_ram_gb = round(psutil.virtual_memory().total / (1024**3), 1)
 
-        # Default path for cluster coordination
-        # Note: In production, this MUST point to a shared network drive (UNC/Mapped)
-        default_cluster_path = os.path.join(os.getcwd(), "CLUSTER_SYNC")
-        self._cluster_path = self.settings.get("cluster_path", default_cluster_path)
-        
-        # [OPTIMIZATION] Do NOT create folders in __init__ (Main Thread Freeze)
-        # self.initialize_structure() 
 
-    def set_local_activity(self, activity_str):
-        """Builds a status string for what this node is doing."""
-        self.current_activity = activity_str
+    def run_loop(self):
+        """Main loop for the worker thread."""
+        self.initialize_structure()
+        
+        while self.running:
+            try:
+                self.sync()
+            except Exception as e:
+                print(f"ClusterWorker: Cycle Error - {e}")
+            
+            # Sleep 5s (but check running flag frequently)
+            for _ in range(50): 
+                if not self.running: break
+                time.sleep(0.1)
+                
+        self.finished.emit()
+
+    def stop(self):
+        self.running = False
+
+    def set_activity(self, activity, count=0):
+        self.current_activity = activity
+        self.active_task_count = count
+
+    def update_settings(self, new_settings):
+        """Allows main thread to update settings without restarting worker."""
+        # Update our internal dict copy
+        self.settings.update(new_settings)
+
 
     def initialize_structure(self):
-        """Create necessary subdirectories in the shared cluster path."""
+        """Create necessary subdirectories."""
         try:
             if not os.path.exists(self._cluster_path):
                 os.makedirs(self._cluster_path)
@@ -54,46 +72,111 @@ class ClusterManager(QObject):
                 if not os.path.exists(path):
                     os.makedirs(path)
         except Exception as e:
-            print(f"ClusterManager: Init Error - {e}")
-
-    def start(self):
-        if not self.is_running:
-            # [OPTIMIZATION] Lazy Init Structure
-            self.initialize_structure()
-            
-            self.is_running = True
-            # [OPTIMIZATION] Delay first sync to allow UI to breathe? 
-            # Or just rely on QTimer delay in Main Window.
-            # But let's keep immediate sync here as 'start' implies 'go now'.
-            # The caller handles the delay.
-            self.sync() # Immediate first sync
-            self.timer.start(5000) # Heartbeat & Sync every 5 seconds
-            print(f"ClusterManager: Started for Node [{self.node_id}] at {self._cluster_path}")
-
-    def stop(self):
-        self.is_running = False
-        self.timer.stop()
-        self._update_my_heartbeat("Offline")
-        print(f"ClusterManager: Stopped")
+            print(f"ClusterWorker: Init Error - {e}")
 
     def sync(self):
+        # 1. Heartbeat
+        self._update_my_heartbeat("Online")
+        
+        # 2. Discover Nodes
+        self._discover_nodes()
+        
+        # 3. [NEW] Leader Election & Role Enforcement
+        self._perform_leader_election()
+        
+        # 4. Task Logic (Split by Role)
+        my_role = self.settings.get("cluster_role", "Worker")
+        
+        if my_role == "Master":
+             # Master: Allocates Tasks
+             self._allocate_pending_tasks()
+             # [NEW] Master: Broadcast Watch Config
+             self._sync_watch_config(role="Master")
+        else:
+             # [NEW] Worker: Read Watch Config
+             self._sync_watch_config(role="Worker")
+        
+        # All Nodes: Sync Assigned Tasks (Worker reads assignments, Master reads status updates)
+        if self.settings.get("cluster_sync_tasks", True):
+             self._sync_tasks()
+
+
+    def _perform_leader_election(self):
+        """
+        Attempts to acquire the 'master.lock' file.
+        - If available or stale: Become Master.
+        - If held by another valid node: Become Worker.
+        """
+        lock_file = os.path.join(self._cluster_path, "master.lock")
+        now = time.time()
+        
+        # 1. Read existing lock
+        current_lock = {}
+        lock_stale = False
+        
+        if os.path.exists(lock_file):
+            try:
+                with open(lock_file, 'r', encoding='utf-8') as f:
+                    current_lock = json.load(f)
+                
+                # Check stale (30s timeout)
+                last_seen = current_lock.get("timestamp", 0)
+                if now - last_seen > 30:
+                    lock_stale = True
+                    # debug_log("Cluster: Master lock is stale.")
+            except:
+                lock_stale = True # Corrupt file -> Stale
+        
+        # 2. Decide Role
+        my_role = "Worker"
+        
+        # Condition A: I am already the owner -> Renew
+        if current_lock.get("node_id") == self.node_id:
+            my_role = "Master"
+            self._write_master_lock(lock_file, now)
+            
+        # Condition B: No lock OR Stale lock -> Claim it
+        elif not os.path.exists(lock_file) or lock_stale:
+            # Try to claim (first come first served)
+            # In a heavy race, file system locking would be better, but this is sufficient for this scale.
+            self._write_master_lock(lock_file, now)
+            # Re-read to confirm we won the race
+            try:
+                with open(lock_file, 'r', encoding='utf-8') as f:
+                    check = json.load(f)
+                if check.get("node_id") == self.node_id:
+                    my_role = "Master"
+            except:
+                pass # Failed to verification, fallback to Worker
+                
+        # 3. Apply Role
+        # Update settings dict in memory (not disk, to avoid settings thrashing) only if changed
+        current_stored = self.settings.get("cluster_role", "Worker")
+        
+        if current_stored != my_role:
+            print(f"Cluster: Role Auto-Switched to {my_role}")
+            self.settings["cluster_role"] = my_role # Update local thread copy
+            
+            # Persist to real settings via Main Thread Signal? 
+            # Actually, better to just emit a signal and let Main Window handle the state change.
+            # But for heartbeat, we need to know NOW.
+            pass
+
+    def _write_master_lock(self, lock_file, timestamp):
+        data = {
+            "node_id": self.node_id,
+            "timestamp": timestamp,
+            "hostname": socket.gethostname()
+        }
         try:
-            # 1. Heartbeat
-            self._update_my_heartbeat("Online")
-            
-            # 2. Discover Nodes
-            self._discover_nodes()
-            
-            # 3. Task Synchronization (Inbound/Outbound)
-            if self.settings.get("cluster_sync_tasks", True):
-                self._sync_tasks()
+            with open(lock_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f)
         except Exception as e:
-            print(f"ClusterManager Sync Error: {e}")
+             print(f"Cluster: Failed to write lock: {e}")
 
     def _update_my_heartbeat(self, status):
         node_file = os.path.join(self._cluster_path, "nodes", f"{self.node_id}.json")
         
-        # Gather Metrics
         cpu = 0
         ram = 0
         try:
@@ -107,23 +190,25 @@ class ClusterManager(QObject):
             "last_seen": datetime.datetime.now().isoformat(),
             "status": status,
             "role": self.settings.get("cluster_role", "Master"),
-            "version": "2026.1.0",
+            "version": CURRENT_VERSION,
             "cpu_usage": cpu,
             "ram_usage": ram,
-            "current_activity": self.current_activity
+            "total_ram": self.total_ram_gb,
+            "current_activity": self.current_activity,
+            "active_task_count": self.active_task_count # [NEW] Crucial for Load Balancing
         }
         try:
+            # Atomic Write (Temp file -> Rename) could be better, but 'w' is okay for now
+            # On network shares, sometimes direct write is safer than rename due to perms
             with open(node_file, "w", encoding="utf-8") as f:
                 json.dump(hb_data, f, indent=2)
-        except:
-            pass
+        except: pass
 
     def _discover_nodes(self):
         node_dir = os.path.join(self._cluster_path, "nodes")
         if not os.path.exists(node_dir): return
         
-        # 1. Read all Valid JSONs first
-        observed_nodes = {}
+        # Read all Valid JSONs
         for filename in os.listdir(node_dir):
             if not filename.endswith(".json"): continue
             filepath = os.path.join(node_dir, filename)
@@ -132,191 +217,362 @@ class ClusterManager(QObject):
                     data = json.load(f)
                     data["_filepath"] = filepath
                     data["_filename"] = filename
-                    observed_nodes[data.get("node_id")] = data
+                    
+                    nid = data.get("node_id")
+                    if nid:
+                        self._known_nodes[nid] = data
+                        self.node_updated.emit(data)
             except: pass
 
-        # 2. Identify Active Hosts (Hostname -> NodeID)
-        # NodeID format assume: HOSTNAME-PID
-        active_hosts = {}
-        now = datetime.datetime.now()
-        
-        for nid, data in observed_nodes.items():
-            last_seen_str = data.get("last_seen")
-            if not last_seen_str: continue
-            try:
-                last_dt = datetime.datetime.fromisoformat(last_seen_str)
-                age = (now - last_dt).total_seconds()
-                data["_age"] = age
-                
-                # If "Active" (e.g. < 15s), mark this host as taken
-                if age < 15:
-                    hostname = nid.rsplit('-', 1)[0]
-                    # Keep track of the most recent active one if multiple?
-                    # Usually only one active per host ideally.
-                    active_hosts[hostname] = nid
-            except: pass
 
-        # 3. Process Logic: Update Status or Prune
-        for nid, data in observed_nodes.items():
-            age = data.get("_age", 9999)
-            hostname = nid.rsplit('-', 1)[0]
-            
-            # Check if superseded
-            # If I am STALE (>15s) AND there is an ACTIVE sibling with same hostname
-            # Then I am definitely old residue. Delete immediately.
-            is_superseded = (age > 15) and (hostname in active_hosts) and (active_hosts[hostname] != nid)
-            
-            should_delete = False
-            status_override = None
-            
-            if is_superseded:
-                should_delete = True
-                status_override = "Offline (Removed)"
-                # print(f"Pruning Superseded Node: {nid} (Active: {active_hosts[hostname]})")
-            elif age > 600: # 10 min hard limit
-                should_delete = True
-                status_override = "Offline (Removed)"
-            elif age > 30:
-                # Just Timeout
-                status_override = "Offline (Timeout)"
-                
-            # Apply Status Override
-            if status_override:
-                data["status"] = status_override
-                data["current_activity"] = "-"
-                data["cpu_usage"] = 0
-                data["ram_usage"] = 0
-
-            # Delete if needed
-            if should_delete:
-                try:
-                     if os.path.exists(data["_filepath"]):
-                        os.remove(data["_filepath"])
-                except: pass
-            
-            # Emit Update
-            # We emit even if deleted so UI can remove it (Offline (Removed))
-            if nid != self.node_id:
-                self._known_nodes[nid] = data
-                self.node_updated.emit(data)
-
-    def _sync_tasks(self):
-        """Scan for tasks added OR updated by other nodes."""
+    def _allocate_pending_tasks(self):
+        """
+        MASTER ONLY: Scans for 'Pending' tasks (unassigned) and assigns them 
+        to the best available node (lowest Active Task Count, then lowest CPU).
+        """
         task_dir = os.path.join(self._cluster_path, "tasks")
         if not os.path.exists(task_dir): return
+        
+        # 1. Gather Online Nodes (Candidates)
+        workers = []
+        for nid, data in self._known_nodes.items():
+            # Must be Online
+            if "Offline" in data.get("status", ""): continue
+            
+            # 2. Calculate Score (Tasks ASC, CPU ASC)
+            score = (data.get("active_task_count", 0) * 100) + data.get("cpu_usage", 0)
+            workers.append({"id": nid, "score": score, "data": data})
+            
+        if not workers: return # No workers to assign to
+        
+        # Sort by Score (Best First)
+        workers.sort(key=lambda x: x["score"])
+        
+        # 3. Scan Tasks
+        try:
+            for filename in os.listdir(task_dir):
+                if not filename.endswith(".json"): continue
+                
+                filepath = os.path.join(task_dir, filename)
+                try:
+                    # Check if modified recently? Or just read.
+                    # Optimization: Use _known_tasks cache to check if we processed this strict state?
+                    # No, we need fresh "assigned_to" status.
+                    
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        task_data = json.load(f)
+                        
+                    # Target: Status=Pending AND No Assigned Node
+                    status = task_data.get("cluster_status", "Pending")
+                    assigned_to = task_data.get("assigned_to")
+                    
+                    if status == "Pending" and not assigned_to:
+                        # FOUND UNASSIGNED TASK -> ASSIGN TO BEST WORKER
+                        best_worker = workers[0]
+                        assigned_nid = best_worker["id"]
+                        
+                        # Atomic Update
+                        task_data["assigned_to"] = assigned_nid
+                        task_data["cluster_status"] = "Assigned"
+                        task_data["assignment_time"] = datetime.datetime.now().isoformat()
+                        
+                        with open(filepath, "w", encoding="utf-8") as f:
+                            json.dump(task_data, f, indent=2, ensure_ascii=False)
+                            
+                        print(f"Cluster[Master]: Assigned {task_data.get('base_name')} -> {assigned_nid} (Score: {best_worker['score']})")
+                        
+                        # Update Local Mock State for next iteration in this same loop?
+                        # Yes, heavily penalize this worker so we round-robin
+                        best_worker["score"] += 100 
+                        best_worker["data"]["active_task_count"] += 1
+                        workers.sort(key=lambda x: x["score"]) # Re-sort
+                        
+                except Exception as e:
+                    # print(f"Cluster: Alloc loop error {filename}: {e}")
+                    pass
+        except: pass
+
+    def _sync_tasks(self):
+        """
+        Reads tasks.
+        - Worker: Only emits if assigned_to == ME.
+        - Master: Emits ALL updates (to update Dashboard).
+        """
+        task_dir = os.path.join(self._cluster_path, "tasks")
+        if not os.path.exists(task_dir): return
+        
+        my_role = self.settings.get("cluster_role", "Worker")
         
         for filename in os.listdir(task_dir):
             if filename.endswith(".json"):
                 filepath = os.path.join(task_dir, filename)
                 try:
                     mtime = os.path.getmtime(filepath)
-                    # Check if new OR modified
-                    # self._known_tasks: dict {filename: last_mtime}
                     if filename not in self._known_tasks or mtime > self._known_tasks[filename]:
                         self._known_tasks[filename] = mtime
                         
-                        # [FIX] Robust Read with Retry for Sync Race Conditions
+                        # Read Task
                         task_data = None
-                        for attempt in range(3):
-                            try:
-                                with open(filepath, "r", encoding="utf-8") as f:
-                                    task_data = json.load(f)
-                                break
-                            except json.JSONDecodeError:
-                                # Start/End of write? Wait a bit
-                                time.sleep(0.1)
-                            except Exception:
-                                break
-                        
+                        for _ in range(3): # Retry for network stability
+                                try:
+                                    with open(filepath, "r", encoding="utf-8") as f:
+                                        task_data = json.load(f)
+                                    break
+                                except: time.sleep(0.1)
+                                
                         if not task_data: continue
-
-                        # Calculate Hostnames (Ignore PID)
-                        # node_origin format: HOSTNAME-PID
-                        origin = task_data.get("node_origin", "")
-                        my_hostname = socket.gethostname()
                         
-                        # [FIX] Ghost Task Prevention
-                        # Ignore tasks that originated from THIS machine (even if different PID/Session)
-                        # We rely on local WatchFolderEngine to detect local tasks from disk.
-                        if not origin.startswith(my_hostname):
+                        task_data["cluster_filename"] = filename
+                        assigned_to = task_data.get("assigned_to")
+                        
+                        # Worker logic: Only emit if assigned to ME or if I sent it (Master sees all)
+                        if my_role == "Master" or assigned_to == self.node_id or task_data.get("node_origin") == self.node_id:
                              self.task_synced.emit(task_data)
-                            
                 except Exception as e:
-                    print(f"ClusterManager: Sync Error {filename} -> {e}")
+                    # print(f"Cluster: Sync Task Error {filename}: {e}")
+                    pass
 
-    def broadcast_task(self, task):
-        """Post a local task to the cluster for others to see/help with."""
-        if not self.is_running: return
+    def _sync_watch_config(self, role):
+        """Syncs watch folder configuration via watch_config.json."""
+        config_file = os.path.join(self._cluster_path, "watch_config.json")
         
+        if role == "Master":
+            # Master: Write current local config to shared area
+            try:
+                watch_list = self.settings.get("watch_folders", [])
+                
+                # Check if file exists and has different content to avoid redundant writes
+                write_needed = True
+                if os.path.exists(config_file):
+                    try:
+                        with open(config_file, 'r', encoding='utf-8') as f:
+                            existing = json.load(f)
+                        if existing == watch_list:
+                             write_needed = False
+                    except: pass
+                
+                if write_needed:
+                    with open(config_file, 'w', encoding='utf-8') as f:
+                        json.dump(watch_list, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                print(f"Cluster: Master Sync Watch Config Error - {e}")
+                
+        else: # Worker
+            # Worker: Read from shared area and update if changed
+            if os.path.exists(config_file):
+                try:
+                    mtime = os.path.getmtime(config_file)
+                    if not hasattr(self, '_last_watch_config_mtime') or mtime > self._last_watch_config_mtime:
+                        self._last_watch_config_mtime = mtime
+                        with open(config_file, 'r', encoding='utf-8') as f:
+                            remote_config = json.load(f)
+                        
+                        # Emit signal for Main Window to update its UI
+                        self.watch_config_synced.emit(remote_config)
+                except Exception as e:
+                    print(f"Cluster: Worker Sync Watch Config Error - {e}")
+
+
+class ClusterManager(QObject):
+    """
+    Main thread interface for the ClusterWorker.
+    """
+    task_synced = Signal(dict)
+    node_updated = Signal(dict)
+    watch_config_synced = Signal(list) # [NEW] Signal for synced watch folders
+    role_changed = Signal(str)
+
+    def __init__(self, settings_manager, parent=None):
+        super().__init__(parent)
+        self.settings = settings_manager
+        self.node_id = f"{socket.gethostname()}"
+        
+        # Path setup
+        default_cluster_path = os.path.join(os.getcwd(), "CLUSTER_SYNC")
+        self._cluster_path = self.settings.get("cluster_path", default_cluster_path)
+        
+        # [FIX] Ensure Robustness
+        try:
+            if not os.path.exists(self._cluster_path):
+                os.makedirs(self._cluster_path, exist_ok=True)
+            # Test Write
+            test_file = os.path.join(self._cluster_path, "test_write")
+            with open(test_file, 'w') as f: f.write("ok")
+            os.remove(test_file)
+        except Exception as e:
+            print(f"Cluster: Failed to write to {self._cluster_path}. Fallback to TMP.")
+            import tempfile
+            self._cluster_path = os.path.join(tempfile.gettempdir(), "ProTranscoder_Cluster")
+            if not os.path.exists(self._cluster_path):
+                os.makedirs(self._cluster_path, exist_ok=True)
+
+        
+        self.worker = None
+        self.thread = None
+        self._known_nodes_cache = {} # Local copy for immediate access
+
+    def start(self):
+        if self.thread and self.thread.isRunning():
+            return
+
+        from PySide6.QtCore import QThread
+        self.thread = QThread()
+        
+        # Pass raw dict of settings needed
+        settings_snapshot = {
+            "cluster_sync_tasks": self.settings.get("cluster_sync_tasks", True),
+            "cluster_role": self.settings.get("cluster_role", "Master")
+        }
+        
+        self.worker = ClusterWorker(self._cluster_path, self.node_id, settings_snapshot)
+        self.worker.moveToThread(self.thread)
+        
+        # Connect Signals
+        self.thread.started.connect(self.worker.run_loop)
+        self.worker.task_synced.connect(self.task_synced)
+        self.worker.node_updated.connect(self._on_node_updated) # Cache locally
+        self.worker.watch_config_synced.connect(self.watch_config_synced) # [NEW]
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        
+        self.thread.start()
+        print(f"ClusterManager: Background Thread Started. NodeID: {self.node_id}")
+
+    def stop(self):
+        if self.worker:
+            self.worker.stop()
+        print("ClusterManager: Stopping...")
+
+    def update_worker_settings(self, new_settings):
+        """Passes new settings to the active background worker."""
+        if self.worker:
+            self.worker.update_settings(new_settings)
+
+    def restart(self, new_path=None):
+        """Stops current worker and restarts with new settings."""
+        print("ClusterManager: Restarting...")
+        self.stop()
+        
+        # Wait for thread to cleanup (simple blocking wait)
+        if self.thread:
+            self.thread.quit()
+            self.thread.wait(2000) 
+            self.thread = None
+            self.worker = None
+            
+        # Update internal path if provided
+        if new_path:
+            self._cluster_path = new_path
+            
+        # Clear cache
+        self._known_nodes_cache = {}
+        
+        # Start fresh
+        self.start()
+
+    def _on_node_updated(self, data):
+        """Update local cache and re-emit."""
+        nid = data.get("node_id")
+        if nid:
+            # Re-implement timeout check logic:
+            last_seen_str = data.get("last_seen")
+            if last_seen_str:
+                try:
+                    last = datetime.datetime.fromisoformat(last_seen_str)
+                    secs = (datetime.datetime.now() - last).total_seconds()
+                    if secs > 30 and data.get("status") == "Online":
+                        data["status"] = "Offline (Timeout)"
+                except: pass
+            
+            self._known_nodes_cache[nid] = data
+            
+        self.node_updated.emit(data)
+
+    def get_all_nodes(self):
+        return self._known_nodes_cache
+
+    def set_local_activity(self, activity_str, active_count=0):
+        if self.worker:
+            self.worker.set_activity(activity_str, active_count)
+
+    # [DIRECT IO METHODS]
+    # These are occasional and quick enough to keep on main thread, 
+    # OR we can move them too if they prove slow. For now, writing small JSONs is usually fast.
+    # Reading/Listing dirs (in sync) was the main blocker.
+    
+    def broadcast_task(self, task):
+        """Post a local task to the cluster."""
+        # Main thread write is okay for singular events
+        # Re-using the logic from before, but simplified
         try:
             task_name = task.get('base_name', 'Task')
-            task_file = os.path.join(self._cluster_path, "tasks", f"{task_name}_{int(time.time())}.json")
+            sanitized_name = "".join([c if c.isalnum() or c in ".-_" else "_" for c in task_name])
+            filename = f"{sanitized_name}_{int(time.time() * 1000)}.json"
+            
+            # Ensure dir exists (Worker might not have created it yet if called immediately)
+            tasks_dir = os.path.join(self._cluster_path, "tasks")
+            if not os.path.exists(tasks_dir): os.makedirs(tasks_dir)
+            
+            task_file = os.path.join(tasks_dir, filename)
             
             cluster_task = task.copy()
             cluster_task["node_origin"] = self.node_id
             cluster_task["cluster_status"] = "Pending"
             cluster_task["broadcast_time"] = datetime.datetime.now().isoformat()
-            
-            # Remove non-serializable objects (like Widget pointers) before saving
             if "widget" in cluster_task: del cluster_task["widget"]
-            if os.path.exists(task_file):
-               pass # Already exists? Overwrite?
-               
+                
             with open(task_file, "w", encoding="utf-8") as f:
                 json.dump(cluster_task, f, ensure_ascii=False, indent=2)
-                
+            
+            return filename
         except Exception as e:
             print(f"ClusterManager: Broadcast Error {e}")
+            return None
+
+    def claim_task(self, task_filename, node_id):
+        """Attempts to claim a task atomic-style."""
+        # Only claiming needs to be synchronous so we know result immediately
+        task_dir = os.path.join(self._cluster_path, "tasks")
+        lock_file = os.path.join(task_dir, f"{task_filename}.lock")
+        
+        if os.path.exists(lock_file): return False
+            
+        try:
+            # Atomic 'x' creation
+            with open(lock_file, "x") as f:
+                f.write(json.dumps({"claimed_by": node_id, "time": datetime.datetime.now().isoformat()}))
+            
+            # Update content
+            task_path = os.path.join(task_dir, task_filename)
+            if os.path.exists(task_path):
+                try:
+                    with open(task_path, "r+", encoding="utf-8") as f:
+                        data = json.load(f)
+                        data["claimed_by"] = node_id
+                        data["cluster_status"] = "Claimed"
+                        f.seek(0)
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                        f.truncate()
+                except: pass
+            return True
+        except:
+            return False
 
     def delete_cluster_task(self, base_name):
-        """
-        [FIX] Deletes task JSONs from the cluster to prevent Ghost Tasks.
-        Called when a user manually removes a Cluster Task from the UI.
-        """
+        """Remove task file from cluster."""
         task_dir = os.path.join(self._cluster_path, "tasks")
         if not os.path.exists(task_dir): return
         
         try:
-            # Iterate and find matching tasks
-            # Logic: Filename usually contains base_name: "{base_name}_{timestamp}.json"
-            # We must be careful not to delete "MyVideo_2" when deleting "MyVideo"
-            found_any = False
             for filename in os.listdir(task_dir):
                 if not filename.endswith(".json"): continue
-                
-                # Check for strict prefix match (base_name + "_") or exact match
-                is_match = False
-                if filename == f"{base_name}.json":
-                    is_match = True
-                elif filename.startswith(f"{base_name}_"):
-                    # Verify that what follows "_" is a timestamp (digits)
-                    # or at least ensure we are deleting the right family
-                    # "MyVideo_123456.json" -> starts with "MyVideo_"
-                    # "MyVideo_Edit_123.json" -> starts with "MyVideo_" ? NO if base matches "MyVideo"
-                    is_match = True
-                
-                if is_match and base_name in filename: # Double check
-                     filepath = os.path.join(task_dir, filename)
+                if filename.startswith(base_name + "_") or filename == base_name:
                      try:
-                         if os.path.exists(filepath):
-                            os.remove(filepath)
-                            print(f"ClusterManager: Deleted Cluster Task {filename}")
-                            found_any = True
-                         else:
-                            print(f"ClusterManager: Task file missing, removing from cache only: {filename}")
-                            
-                         # Remove from cache so if it comes back (race condition), we see it as new?
-                         # Actually if we delete it, it's gone.
-                         if filename in self._known_tasks:
-                             del self._known_tasks[filename]
-                     except Exception as e:
-                         print(f"ClusterManager: Failed to delete {filename}: {e}")
-            
-            # [FIX] Force cache cleanup even if file wasn't found (Ghost Task scenario)
-            # If the file is already gone but cache has it, we must clear the cache
-            # to prevent it from being re-emitted if logic elsewhere is flawed,
-            # though usually sync relies on file existence. 
-            # The more important part is UI needs to delete it unconditionally.
-            
-        except Exception as e:
-            print(f"ClusterManager: Delete Error {e}")
+                         # Delete Task
+                         os.remove(os.path.join(task_dir, filename))
+                         # Delete Lock if exists
+                         lock = os.path.join(task_dir, filename + ".lock")
+                         if os.path.exists(lock): os.remove(lock)
+                     except: pass
+        except: pass

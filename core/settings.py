@@ -17,12 +17,24 @@ def debug_log(msg):
 
 if getattr(sys, 'frozen', False):
     # Running as compiled exe
+    # [FIX] Use explicit Exe Dir, avoid cwd ambiguity
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     # Running as script
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
+
+# [VERSIONING]
+CURRENT_VERSION = "2026.2.3"
+
+# [DEBUG]
+try:
+    with open(os.path.join(BASE_DIR, "debug_startup.log"), "a") as f:
+        f.write(f"Startup BaseDir: {BASE_DIR}\n")
+        f.write(f"Settings Path: {SETTINGS_FILE}\n")
+except: pass
+
 
 class SettingsManager:
     _instance = None
@@ -31,6 +43,7 @@ class SettingsManager:
         if cls._instance is None:
             cls._instance = super(SettingsManager, cls).__new__(cls)
             cls._instance.settings = {
+                "app_version": "0.0.0", # Default for old installations
                 "output_dir": "",
                 "vcodec": "h264_nvenc",
                 "bitrate": "5000k",
@@ -42,6 +55,19 @@ class SettingsManager:
             debug_log(f"Initializing SettingsManager. Path: {SETTINGS_FILE}")
             cls._instance.load()
         return cls._instance
+
+    def is_new_version(self):
+        """Returns True if the loaded version is different from CURRENT_VERSION."""
+        loaded_version = self.settings.get("app_version", "0.0.0")
+        if loaded_version == "NEW_INSTALL":
+            return True # Force prompt on fresh install/reset
+        return loaded_version != CURRENT_VERSION
+
+    def stamp_version(self):
+        """Updates the settings with the current app version."""
+        self.set('app_version', CURRENT_VERSION)
+        self.save()
+        debug_log(f"Version stamped: {CURRENT_VERSION}")
 
     def update_history(self, file_path, position):
         if not file_path: return
@@ -112,7 +138,25 @@ class SettingsManager:
             except Exception as e:
                 debug_log(f"Error loading settings: {e}")
         else:
-            debug_log("Settings file not found. Using defaults.")
+            # [FIX] Clean up CLUSTER_SYNC on fresh install to prevent ghost tasks
+            try:
+                cluster_path = os.path.join(os.getcwd(), "CLUSTER_SYNC")
+                if os.path.exists(cluster_path):
+                    debug_log(f"[SETTINGS] Cleaning cluster path on fresh install: {cluster_path}")
+                    import shutil
+                    for sub in ["tasks", "nodes", "master.lock", "watch_config.json"]:
+                        p = os.path.join(cluster_path, sub)
+                        if os.path.exists(p):
+                            if os.path.isdir(p): 
+                                shutil.rmtree(p, ignore_errors=True)
+                            else: 
+                                os.remove(p)
+            except Exception as e:
+                debug_log(f"[SETTINGS] Cluster cleanup failed: {e}")
+                
+            # [FIX] For fresh install/reset, use marker to avoid prompt
+            self.settings["app_version"] = "NEW_INSTALL"
+            debug_log("Settings: Fresh install marker set.")
 
     def save(self):
         try:
