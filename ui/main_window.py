@@ -4459,6 +4459,21 @@ class ModernTranscoderUI(QMainWindow):
         return ("雖然無法定位具體成因，但這類錯誤通常與路徑中的特殊字元或不相容的編碼參數有關。\n\n💡 建議方案：套用 [相容模式 (Safety Fix)]，將容器強制設為 MP4 並使用標準 H.264 編碼再次嘗試。", 
                 {"container": "mp4", "vcodec": "libx264", "acodec": "aac"})
 
+    # [FIX] Added missing history method
+    def add_to_history(self, source, output, info=""):
+        """Adds completed task details to global history."""
+        try:
+            # 1. Add to Settings History (MRU)
+            if hasattr(self, 'settings'):
+                self.settings.add_source_history(source)
+                self.settings.add_output_history(output)
+            
+            # 2. Log
+            print(f"History Added: {source} -> {output} ({info})")
+            
+        except Exception as e:
+            print(f"ERROR: Failed to add to history: {e}")
+
     def on_transcode_complete(self, exit_code, exit_status, task, single_run):
         try:
             widget = task["widget"]
@@ -4496,11 +4511,18 @@ class ModernTranscoderUI(QMainWindow):
                 widget.lbl_info.setText(f"{current_info}  |  ⏱️ {speed_text}")
                 
                 # Mirror to Dashboard (if exists and linked)
-                # [FIX] Mirror Widget safety check
-                mirror = self.workers[task.get("worker_id", "Manual")].get("mirror_widget")
-                if mirror and shiboken6.isValid(mirror):
-                     mirror.update_status("Completed", 100)
-                     mirror.lbl_speed.setText(speed_text)
+                # Mirror to Dashboard (if exists and linked)
+                # [FIX] Mirror Widget safety check with try-except to prevent crash on missing worker_id
+                try:
+                    w_id = task.get("worker_id", "Manual")
+                    # Handle case where worker_id might be "Auto" or "AUTO" which aren't in self.workers
+                    if w_id in self.workers:
+                        mirror = self.workers[w_id].get("mirror_widget")
+                        if mirror and shiboken6.isValid(mirror):
+                             mirror.update_status("Completed", 100)
+                             mirror.lbl_speed.setText(speed_text)
+                except Exception as e:
+                    print(f"DEBUG: Mirror update skipped for worker {task.get('worker_id')}: {e}")
                 
                  # Add to History (Only if successful)
                 # [NEW] Move from _TEMP to Final Output Directory (for watch folder tasks)
