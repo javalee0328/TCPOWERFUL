@@ -95,7 +95,10 @@ class TranscodeWorker(QThread):
                 
         except Exception as e:
             debug_log(f"Worker Exception: {e}")
-            self.finished_signal.emit(False, str(e))
+            err_msg = str(e)
+            if "WinError 2" in err_msg:
+                 err_msg += "\n\n[系統找不到指定的檔案]\n這表示 Worker 電腦上缺少 FFmpeg 執行檔。\n請嘗試將 ffmpeg.exe 複製到程式同一目錄下的 core 資料夾中。"
+            self.finished_signal.emit(False, err_msg)
 
     def kill(self):
         self.killed = True
@@ -647,10 +650,19 @@ class TaskProgressWidget(QWidget):
         self.output_path = out_path
         
         # UI Updates
-        self.lbl_status.setText("Done")
+        self.lbl_status.setText("完成 (Done)")
         self.lbl_perf.setText(speed_text)
+        self.progress.setRange(0, 100) # Ensure range is fixed
+        self.progress.setValue(100)    # Force 100%
         self.progress.setFormat("100%")
-        self.progress.setValue(100)
+        # Force Green style immediately
+        self.progress.setStyleSheet("""
+            QProgressBar {
+                background-color: #333; border: none; border-radius: 4px; height: 14px;
+                text-align: center; color: white; font-size: 10px; font-weight: bold;
+            }
+            QProgressBar::chunk { background-color: #2e7d32; border-radius: 4px; }
+        """)
         
         # Display full time range
         end_time = QTime.currentTime().toString("HH:mm:ss")
@@ -658,23 +670,24 @@ class TaskProgressWidget(QWidget):
         self.lbl_time_range.setText(f"{start_t_str} - {end_time}")
         
         # Icon/Buttons - SWAPPED per User Request
-        # Main Button -> Play
-        self.btn_transcode.setIcon(self.create_geometric_icon("play", "#4caf50", size=24)) # Green Play 
-        self.btn_transcode.setToolTip("播放結果 (Play Result)")
-        # Disconnect old transcode slot and connect play
+        # 1. Main Button (Left) -> REFRESH / RE-TRANSCODE
+        self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24))
+        self.btn_transcode.setToolTip("重新轉碼 (Re-Transcode)")
+        # Disconnect old signal and connect toggle_transcode (which restarts)
         try: self.btn_transcode.clicked.disconnect() 
         except: pass
-        self.btn_transcode.clicked.connect(self.play_or_refresh)
+        self.btn_transcode.clicked.connect(self.toggle_transcode)
         
-        # Secondary Button -> Re-transcode (Refresh)
+        # 2. Secondary Button (Right) -> PLAY (Green Triangle)
         self.btn_play_result.show()
-        self.btn_play_result.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=20))
-        self.btn_play_result.setToolTip("重新轉碼 (Re-Transcode)")
-        self.btn_play_result.setStyleSheet("QToolButton { background-color: #444; border: 1px solid #555; border-radius: 4px; }")
-        # Disconnect play slot and connect transcode
+        self.btn_play_result.setIcon(self.create_geometric_icon("play", "#4caf50", size=24)) # Green Play 
+        self.btn_play_result.setToolTip("播放結果 (Play Result)")
+        # Allow it to look like a play button
+        self.btn_play_result.setStyleSheet("QToolButton { background-color: transparent; border: 1px solid #4caf50; border-radius: 4px; } QToolButton:hover { background-color: #1b5e20; }")
+        
         try: self.btn_play_result.clicked.disconnect()
         except: pass
-        self.btn_play_result.clicked.connect(self.toggle_transcode) # This triggers re-transcode logic
+        self.btn_play_result.clicked.connect(self.play_or_refresh) 
         
         self.btn_open_folder.show()
         
@@ -1112,6 +1125,7 @@ class ModernTranscoderUI(QMainWindow):
         self.current_source = ""
         self.pending_tasks = []
         self.pending_tasks = []
+        self.current_running_task = None # [FIX] Initialize missing attribute
         self.workers = {} # Key: widget, Value: TranscodeWorker
         self.is_processing = False
         self._pumping_queue = False # [FIX] Concurrency Guard
@@ -1144,7 +1158,9 @@ class ModernTranscoderUI(QMainWindow):
         self.apply_styles()
         
         debug_log("MainWindow: Loading Pending Tasks")
-        self.load_pending_tasks() # Restore tasks
+        # [DISABLED] User Request: Don't restore tasks on restart
+        # self.load_pending_tasks() # Restore tasks
+        debug_log("MainWindow: Skipping task restoration (clean start)")
         
         # Start Background Services AFTER UI Init
         # [OPTIMIZATION] Delay Start to allow UI to render first (Fixes "Slow Startup" feeling)
@@ -1154,6 +1170,7 @@ class ModernTranscoderUI(QMainWindow):
             
         # Cluster Manager often hits network drives (slow), call it later
         # Start Cluster Manager slightly earlier to determine role quickly
+        self.cluster_mgr.role_changed.connect(self.on_cluster_role_changed) # [NEW] Connect dynamic role handler
         QTimer.singleShot(1500, self.cluster_mgr.start)
         
         # Auto-save timer (every 30 seconds)
@@ -1540,9 +1557,20 @@ class ModernTranscoderUI(QMainWindow):
             print(f"DEBUG: Saved position {pos}")
         
         # [FIX] Clean Shutdown for Threads to avoid PyInstaller temp dir warnings
+        if hasattr(self, 'workers') and self.workers:
+            print(f"DEBUG: Killing {len(self.workers)} active workers...")
+            for w, worker in list(self.workers.items()):
+                try:
+                    worker.kill()
+                    worker.wait(200) # Give it 200ms to die
+                    if worker.isRunning():
+                        worker.terminate()
+                except: pass
+            
         if hasattr(self, 'watch_engine'):
             print("DEBUG: Stopping Watch Engine...")
             self.watch_engine.stop()
+            self.watch_engine.wait(500) # Ensure thread stops
             
         # Stop Cluster Manager (if it has a stop method)
         if hasattr(self, 'cluster_mgr') and hasattr(self.cluster_mgr, 'stop'):
@@ -2584,6 +2612,34 @@ class ModernTranscoderUI(QMainWindow):
         self.manual_task_list.itemClicked.connect(self.on_task_item_clicked)
         self.manual_task_list.itemDoubleClicked.connect(self.on_task_item_double_clicked)
         mon_layout.addWidget(self.manual_task_list)
+        
+        # [NEW] History & Logs Section (User Request #3)
+        hist_header = QFrame()
+        hist_header.setFixedHeight(30)
+        hist_header.setStyleSheet("background-color: #333; border-top: 2px solid #555; border-bottom: 1px solid #444;")
+        hh_layout = QHBoxLayout(hist_header)
+        hh_layout.setContentsMargins(15, 0, 5, 0)
+        hh_label = QLabel("監控記錄 (History & Logs)")
+        hh_label.setStyleSheet("color: #FFA726; font-weight: bold;")
+        hh_layout.addWidget(hh_label)
+        hh_layout.addStretch()
+        mon_layout.addWidget(hist_header)
+        
+        self.history_list = QListWidget()
+        self.history_list.setAlternatingRowColors(True)
+        self.history_list.setStyleSheet("""
+            QListWidget {
+                background-color: #2b2b2b;
+                border: 1px solid #333;
+                border-radius: 4px;
+            }
+            QListWidget::item {
+                border-bottom: 1px solid #333;
+                color: #888;
+            }
+        """)
+        mon_layout.addWidget(self.history_list)
+
         content_splitter.addWidget(monitor_widget)
         
         trans_layout.addWidget(content_splitter)
@@ -3210,10 +3266,9 @@ class ModernTranscoderUI(QMainWindow):
         else:
             source = source_path
             
-        # [FIX] Final Safety Check: File Must Exist
-        if not os.path.exists(source):
-            debug_log(f"add_task_to_queue: Ignored non-existent file: {source}")
-            return
+        # [FIX] Removed premature file existence check
+        # os.path.exists() fails for some UNC paths even when files exist
+        # Let probe in run_transcode handle file validation instead
             
         # 2. Base Name
         # Capture current naming
@@ -3283,7 +3338,7 @@ class ModernTranscoderUI(QMainWindow):
             "container": self.combo_container.currentText(),
             "vcodec": self.combo_vcodec.currentText(),
             "audio_gain": 'auto' if self.btn_auto_gain.isChecked() else self.spin_gain.value(),
-            "resolution": getattr(self, 'current_preset_extra', {}).get("resolution"),
+            "resolution": getattr(self, 'current_preset_extra', {}).get("resolution") or "-", # Fallback
             "fps": getattr(self, 'current_preset_extra', {}).get("fps"),
             "fps_text": self.combo_fps.currentText() if hasattr(self, 'combo_fps') else None,
             "audio_ch": getattr(self, 'current_preset_extra', {}).get("audio_ch"),
@@ -3315,12 +3370,54 @@ class ModernTranscoderUI(QMainWindow):
         if source_type != "Manual":
             target_list = self.auto_task_list
             
+        # [FIX] Deduplication Check
+        # User Complaint: "Duplicate tasks" (one from Watch, one from Cluster)
+        # Check if SAME FILE (Path + Name) already exists in the target list
+        duplicate_found = False
+        
+        # Normalize current source for comparison
+        current_source_norm = os.path.normpath(source).lower() if source else ""
+        
+        for i in range(target_list.count()):
+             it = target_list.item(i)
+             w = target_list.itemWidget(it)
+             if w:
+                 w_data = getattr(w, 'task_data', {})
+                 existing_base = w_data.get("base_name")
+                 existing_source = w_data.get("source", "")
+                 existing_source_norm = os.path.normpath(existing_source).lower() if existing_source else ""
+                 
+                 # Strict Dedup: BaseName AND Source Path must match
+                 # If Source is different (e.g. D:/A.mp4 vs Z:/B.mp4 where names mismatch), it's fine.
+                 # If Source is different but Names match (D:/A.mp4 vs Z:/A.mp4), allow it!
+                 # If Source same (D:/A.mp4 vs D:/A.mp4), reject.
+                 
+                 # However, what if WatchFolder (local path) vs Cluster (UNC path)?
+                 # This is tricky. But usually WatchFolder uses consistent mapping.
+                 
+                 # If base_name matches, checks source.
+                 if existing_base == final_base:
+                     # If source matches, definitely duplicate.
+                     if existing_source_norm == current_source_norm:
+                         duplicate_found = True
+                         break
+                     
+                     # If source differs, we allow it?
+                     # User said "3 files generate 1 task". If they had same name?
+                     # We should allow same name from diff source.
+                     pass 
+                     
+        if duplicate_found:
+             debug_log(f"add_task_to_queue: Ignored duplicate task: {final_base}")
+             return
+
         item = QListWidgetItem(target_list)
         item.setSizeHint(QSize(0, 36)) # Reduced height        
         # [NEW] Visual Distinction
         display_label = final_base
-        if source_type != "Manual":
-            display_label = f"[監控] {final_base}"
+        # [FIX] Removed [監控] prefix to match cluster naming and prevent confusion
+        # if source_type != "Manual":
+        #    display_label = f"[監控] {final_base}"
             
         widget = TaskProgressWidget(display_label)
         
@@ -3338,7 +3435,9 @@ class ModernTranscoderUI(QMainWindow):
              widget.setStyleSheet("QFrame#TaskRow { background-color: #203020; } QLabel { color: #cfd8dc; }")
              
         widget.set_task_data(task) # Store Data & Set Tooltip
-        widget.lbl_status.setText("Pending")
+        # Only set to Pending if not already set (e.g. to Claimed)
+        if widget.lbl_status.text() not in ["Claimed", "Processing"]:
+            widget.lbl_status.setText("Pending")
         widget.removed.connect(self.remove_task_by_widget) # CONNECT SIGNAL
         widget.transcode_requested.connect(self.transcode_single_item) 
         widget.pause_requested.connect(self.pause_task)
@@ -3580,7 +3679,23 @@ class ModernTranscoderUI(QMainWindow):
                             candidate_task = t
                             candidate_index = i
                             break
-                        # If unassigned or assigned to others, skip
+                        
+                        # [FIX] Master Node Fallback
+                        # If I am Master, and task is UNASSIGNED, I should pick it up 
+                        # (solves "Master won't transcode" single-node issue).
+                        # We only do this if we are indeed the Master.
+                        if not assigned and self.settings.get("cluster_role", "Master") == "Master":
+                             # Check if we want to wait for workers?
+                             # For now, immediate claim is better for responsiveness.
+                             debug_log(f"Master claiming unassigned task: {t.get('base_name')}")
+                             candidate_task = t
+                             candidate_index = i
+                             # We must claim it proactively
+                             # self.cluster_mgr.claim_task(...) # actually run_transcode will handle status update
+                             break
+                        
+                        # If assigned to others, skip
+
                     else:
                         # Manual/Local Task: Always eligible
                         candidate_task = t
@@ -3597,7 +3712,14 @@ class ModernTranscoderUI(QMainWindow):
                 # Double check source existence (Shared Storage Check)
                 source = task.get("source")
                 if source and not os.path.exists(source):
-                     print(f"Skipping task (unreachable source): {source}")
+                     debug_log(f"Skipping task (unreachable source): {source}")
+                     # [FIX] Update UI to show failure instead of silent drop
+                     widget = task.get("widget")
+                     if widget:
+                         widget.lbl_status.setText("Failed (Source Missing)")
+                         widget.lbl_status.setStyleSheet("color: #ff8a80; font-weight: bold;")
+                         widget.progress.setValue(100)
+                         widget.progress.setStyleSheet("QProgressBar::chunk { background-color: #d32f2f; }")
                      continue
 
                 # [NEW] Update widget to show "Processing" immediately
@@ -3605,6 +3727,11 @@ class ModernTranscoderUI(QMainWindow):
                 if widget:
                     widget.lbl_status.setText("Processing")
                     widget.lbl_status.setStyleSheet("color: #ffd54f; font-weight: bold;")
+                    
+                    # [FIX] Show Actual Worker ID instead of AUTO/Available
+                    local_id = self.cluster_mgr.node_id.split('-')[0]
+                    widget.lbl_node.setText(local_id)
+                    widget.lbl_node.setStyleSheet("color: #BB86FC; font-weight: bold;")
 
                 
                 # Safety Check: Skip broken tasks
@@ -3618,16 +3745,22 @@ class ModernTranscoderUI(QMainWindow):
         finally:
             self._pumping_queue = False
 
+        # [FIX] Auto-Poll Queue (User Issue: "Worker IDLE")
+        # If we still have pending tasks but couldn't fill all slots (e.g. waiting for assignment),
+        # schedule another check in a few seconds to pick up newly assigned tasks
+        if self.pending_tasks and active_count < max_parallel:
+            QTimer.singleShot(3000, self.process_next_task)
+            debug_log(f"Queue polling: {len(self.pending_tasks)} tasks pending, will recheck in 3s")
+
         if not self.pending_tasks and active_count == 0:
             self.is_processing = False
             self.btn_start_all.setEnabled(True)
 
     def run_transcode(self, task, single_run=False):
-        # [FIX] Immediate Worker Registration to prevent Concurrency Race Condition
+        # [FIX] Removed premature worker check - it prevented retries and caused stalls
+        # Duplicate worker handling is done properly at line 3866-3870 before worker creation
+        
         widget = task["widget"]
-        if widget in self.workers:
-            return 
-
         self.current_running_task = task # Store ref for cancellation
         from core.transcoder import Transcoder
         from core.gpu_detector import get_gpu_encoders, get_best_h264_encoder
@@ -3658,7 +3791,7 @@ class ModernTranscoderUI(QMainWindow):
             "out_point": self.format_ms(task["out_point"]),
             "bitrate": str(task.get("bitrate", "5000")).rstrip('k') + "k",
             "audio_gain": task.get("audio_gain", 0.0),
-            "resolution": task.get("resolution"),
+            "resolution": task.get("resolution") if task.get("resolution") and "x" in str(task.get("resolution")) else None,
             "fps": task.get("fps"),
             "audio_ch": task.get("audio_ch"),
             "acodec": task.get("acodec", "aac") # Pass Audio Codec
@@ -3698,16 +3831,25 @@ class ModernTranscoderUI(QMainWindow):
             # 儲存最終輸出目錄供轉碼完成後使用
             task["final_output_dir"] = final_output_dir
             
-            # 轉碼期間使用來源監控資料夾下的 _TEMP
-            src_watch_folder = os.path.dirname(task["source"])
-            temp_dir = os.path.join(src_watch_folder, "_TEMP")
-            
-            if not os.path.exists(temp_dir):
-                os.makedirs(temp_dir)
-                debug_log(f"Created _TEMP directory: {temp_dir}")
-            
-            task["output_dir"] = temp_dir
-            debug_log(f"Watch folder task will transcode to _TEMP: {temp_dir}, then move to: {final_output_dir}")
+            # [FIX] Try to use _TEMP, but fallback to direct output if it fails
+            try:
+                # 轉碼期間使用來源監控資料夾下的 _TEMP
+                src_watch_folder = os.path.dirname(task["source"])
+                temp_dir = os.path.join(src_watch_folder, "_TEMP")
+                
+                if not os.path.exists(temp_dir):
+                    os.makedirs(temp_dir)
+                    debug_log(f"Created _TEMP directory: {temp_dir}")
+                
+                task["output_dir"] = temp_dir
+                debug_log(f"Watch folder task will transcode to _TEMP: {temp_dir}, then move to: {final_output_dir}")
+            except Exception as e:
+                # Fallback: use final output dir directly if _TEMP creation fails
+                debug_log(f"Failed to create _TEMP directory: {e}, using direct output")
+                if final_output_dir:
+                    task["output_dir"] = final_output_dir
+                else:
+                    task["output_dir"] = os.path.dirname(task["source"])
             
         else:
             # 手動任務：直接使用最終輸出目錄
@@ -3975,16 +4117,89 @@ class ModernTranscoderUI(QMainWindow):
         # self.watch_engine.file_detected.connect(self.on_watch_folder_detected)
         # self.watch_engine.snapshot_ready.connect(self.populate_dashboard_ui) 
         
-        # [FIX] Ensure engine is running (removed cluster role check - always enable if folders exist)
+        # [FIX] Strict Role Enforcement: Only Master runs Watch Engine
         if hasattr(self, 'watch_engine'):
-            if len(watch_folders) > 0 and not self.watch_engine.isRunning():
-                print(f"DEBUG_UI: Starting Watch Folder Engine...")
-                self.watch_engine.start()
-                print(f"DEBUG_UI: Watch Folder Engine started.")
-            elif len(watch_folders) == 0:
-                print(f"DEBUG_UI: No watch folders configured, engine not started.")
+            current_role = self.settings.get("cluster_role", "Worker")
+            
+            if current_role == "Master":
+                if len(watch_folders) > 0 and not self.watch_engine.isRunning():
+                    print(f"DEBUG_UI: Master Role Detected. Starting Watch Folder Engine...")
+                    self.watch_engine.start()
+                elif len(watch_folders) == 0 and self.watch_engine.isRunning():
+                    self.watch_engine.stop()
             else:
-                print(f"DEBUG_UI: Watch Folder Engine already running.")
+                # If Worker, ensure stopped
+                if self.watch_engine.isRunning():
+                    print(f"DEBUG_UI: Worker Role Detected. Stopping Watch Folder Engine...")
+                    self.watch_engine.stop()
+
+    # [FIX] Missing Handler for Watch Folder Detection
+    def on_watch_folder_detected(self, file_path, folder_name):
+        """
+        Triggered when WatchFolderEngine detects a new stable file.
+        Constructs a task and broadcasts it to the cluster/local queue.
+        """
+        print(f"DEBUG_UI: Watch Folder Event: {file_path} in {folder_name}")
+        
+        # 1. Find matching Watch Folder Settings to get Presets
+        watch_folders = self.settings.get("watch_folders", [])
+        target_wf = None
+        for wf in watch_folders:
+            if wf.get("name") == folder_name:
+                target_wf = wf
+                break
+        
+        if not target_wf:
+            print(f"DEBUG_UI: Error - No matching config found for {folder_name}")
+            return
+
+        # 2. Get Metadata (Duration, Streams)
+        try:
+             meta = get_video_metadata(file_path)
+        except Exception as e:
+             print(f"DEBUG_UI: Metadata probe failed: {e}")
+             meta = {"duration": 0, "streams": []}
+
+        # 3. Construct Task Data
+        # Use Preset if defined
+        preset_name = target_wf.get("preset_name", "MP4 (H.264 High)")
+        preset_data = self.settings.get("presets", {}).get(preset_name, {})
+        
+        # Fallback if preset deleted
+        if not preset_data:
+             preset_data = {"container": "mp4", "vcodec": "h264", "bitrate": "5000"}
+
+        task_data = {
+            "source": file_path,
+            "source_path": file_path, # Dual compatibility
+            "base_name": os.path.basename(file_path),
+            "size": os.path.getsize(file_path) if os.path.exists(file_path) else 0,
+            "duration": meta.get("duration", 0),
+            "audio_layout": meta.get("audio_layout", "Stereo"),
+            
+            # Preset Params
+            "preset_name": preset_name,
+            "container": preset_data.get("container", "mp4"),
+            "vcodec": preset_data.get("vcodec", "h264"),
+            "video_bitrate": preset_data.get("bitrate", "5000"),
+            "acodec": preset_data.get("acodec", "aac"),
+            
+            # Cluster Meta
+            "status": "Pending",
+            "progress": 0,
+            "source_type": f"WatchFolder ({folder_name})",
+            "retry_count": 0,
+            "priority": 10,
+            "node_origin": self.cluster_mgr.node_id
+        }
+        
+        # 4. Broadcast to Cluster
+        # This writes to the shared storage. The Sync Loop will pick it up and add it to UI.
+        if hasattr(self, 'cluster_mgr'):
+             print(f"DEBUG_UI: Broadcasting Task to Cluster: {task_data['base_name']}")
+             self.cluster_mgr.broadcast_task(task_data)
+        else:
+             print("DEBUG_UI: Cluster Manager missing, cannot schedule task.")
 
     def refresh_cluster_ui(self):
         """Refreshes the Cluster Status page with current node information."""
@@ -4066,7 +4281,7 @@ class ModernTranscoderUI(QMainWindow):
             src = t.get("source")
             if src: running_paths.add(os.path.normpath(src).lower())
             
-        if self.current_running_task:
+        if getattr(self, 'current_running_task', None):
             src = self.current_running_task.get("source")
             if src: running_paths.add(os.path.normpath(src).lower())
             
@@ -4096,24 +4311,59 @@ class ModernTranscoderUI(QMainWindow):
                 if pt_src and os.path.normpath(pt_src).lower() == norm_path:
                     is_in_queue = True
                     break
-            if is_in_queue: return
-
-            # [FIX] Final Ghost Task Prevention: Verify Existence
-            if not os.path.exists(path):
-                return
-                
-            # Standardize Prefixes: Use [監控] for all WatchFolder automated tasks
-            if category == 'pending':
-                # [RECOVERY] If an item is in the 'pending' folder but NOT in our active queue,
-                # it means it missed a detection (e.g. added while app closed).
-                # Queue it now to ensure it gets processed.
-                # However, this method is called OFTEN. We shouldn't auto-queue here aggressively or we dup.
-                # Best to let User click or have a dedicated 'Re-scan' button.
-                # OR: Only Queue if we act as Master and it's pending.
-                pass 
             
-            # Create Widget (for Done/Error items)
-            w_item = QListWidgetItem(self.auto_task_list)
+            # [RECOVERY] If pending in snapshot but not in queue, we MUST add it to queue
+            # Otherwise it's a ghost task that never runs.
+            if category == 'pending' and not is_in_queue:
+                # Add to internal queue
+                task_data = {
+                    "source": path,
+                    "base_name": item['base_name'],
+                    "source_type": "WatchFolder", 
+                    "worker_id": "Auto", # Will be claimed by Cluster/Local
+                    "status": "Pending",
+                    "progress": 0,
+                    "timestamp": time.time(),
+                    "retry_count": item.get("retry_count", 0),
+                    "claimed_by": item.get("claimed_by"), # Restore claim info
+                    "assigned_to": item.get("assigned_to")
+                }
+                self.pending_tasks.append(task_data)
+                
+                # Trigger Queue Pump
+                if not self.is_processing:
+                    QTimer.singleShot(500, self.process_next_task)
+                
+                is_in_queue = True # Now it is
+            
+            # Logic Split: Pending -> Auto Task List, Done/Error -> History List
+            target_list = None
+            
+            if category == 'pending':
+                target_list = self.auto_task_list
+            elif category in ['done', 'error']:
+                 if hasattr(self, 'dashboard_history_list'):
+                     target_list = self.dashboard_history_list
+                 else:
+                     target_list = self.auto_task_list # Fallback
+            
+            if not target_list: return
+
+            # [FIX] Deduplication in Sync (User Complaint: "Why Duplicate?")
+            # Check if exists in target_list
+            duplicate_found = False
+            for i in range(target_list.count()):
+                it = target_list.item(i)
+                w = target_list.itemWidget(it)
+                if w:
+                    w_data = getattr(w, 'task_data', {})
+                    if w_data.get("base_name") == item['base_name']:
+                        duplicate_found = True
+                        break
+            if duplicate_found: return # [FIX] Use return, not continue, as we are in a helper function
+
+            # Create Widget
+            w_item = QListWidgetItem(target_list)
             
             if category == 'done':
                 w_item.setSizeHint(QSize(0, 36))
@@ -4124,6 +4374,7 @@ class ModernTranscoderUI(QMainWindow):
                 widget.lbl_status.setText("Done")
                 widget.lbl_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
                 widget.set_done(path, self.player, "Done")
+                
             elif category == 'error':
                  w_item.setSizeHint(QSize(0, 36))
                  widget = TaskProgressWidget(f"[錯誤] {item['base_name']}")
@@ -4132,20 +4383,37 @@ class ModernTranscoderUI(QMainWindow):
                  widget.progress.setValue(100)
                  widget.progress.setStyleSheet("QProgressBar::chunk { background-color: #d32f2f; }")
                  widget.setToolTip(item.get("log_content", "Error"))
+                 
             else:
-                 # Pending Display Only
+                 # Pending Display
                  w_item.setSizeHint(QSize(0, 36))
-                 widget = TaskProgressWidget(f"[待機] {item['base_name']}")
+                 # Use claimed info if available
+                 claimed = item.get("claimed_by")
+                 display_name = item['base_name'] # [FIX] Removed [待機] prefix
+                 
+                 widget = TaskProgressWidget(display_name)
                  widget.lbl_status.setText("Pending")
+                 
+                 if claimed:
+                     short_node = claimed.split('-')[0]
+                     widget.lbl_node.setText(short_node)
+                     widget.lbl_node.setStyleSheet("color: #BB86FC; font-weight: bold;")
+                     widget.lbl_status.setText("Claimed")
+                     widget.lbl_status.setStyleSheet("color: #BB86FC; font-weight: bold;")
+
             
-            # Common Setup
+            # Common Data Binding
             task_data = {
                 "source": path,
                 "base_name": item['base_name'],
                 "source_type": "WatchFolder", 
                 "worker_id": "Auto",
                 "status": "Pending" if category == 'pending' else category.capitalize(),
-                "progress": 0 if category == 'pending' else 100
+                "progress": 0 if category == 'pending' else 100,
+                # [FIX] Populate Metadata if available to prevent empty rows
+                "format_info": item.get("format_info", ""),
+                "duration": item.get("duration", ""),
+                "size_mb": item.get("size", 0)
             }
             widget.set_task_data(task_data)
             
@@ -4157,10 +4425,16 @@ class ModernTranscoderUI(QMainWindow):
             widget.removed.connect(lambda w=widget: self.remove_task_by_widget(w))
             widget.switch_page_requested.connect(self.show_transcoder_page)
             
-            # [FIX] Add to History List
-            if hasattr(self, 'dashboard_history_list'):
-                self.dashboard_history_list.addItem(w_item)
-                self.dashboard_history_list.setItemWidget(w_item, widget)
+            # [CRITICAL FIX] Always set widget on the target list
+            target_list.setItemWidget(w_item, widget)
+            
+            # Store widget ref if we recovered it to queue
+            if category == 'pending' and 'task_data' in locals():
+                 # Find the dict in pending_tasks and update widget ref
+                 for pt in self.pending_tasks:
+                     if pt.get("source") == path:
+                         pt["widget"] = widget
+                         break
 
     def refresh_cluster_ui(self):
         try:
@@ -4260,6 +4534,16 @@ class ModernTranscoderUI(QMainWindow):
     def update_task_progress(self, widget, percent, text):
         try:
             if not widget or getattr(widget, 'stopped', False): return # Block updates if stopped
+            
+            # [FIX] Race Condition Guard: If status is Done/Completed, Ignore late progress
+            # This prevents 99% progress signal overwriting the 100% completion state
+            lbl = getattr(widget, 'lbl_status', None)
+            if lbl and (lbl.text() == "Done" or lbl.text() == "Completed" or lbl.text() == "完成 (Done)" or getattr(widget, 'state', '') == 'done'):
+                # Force 100% just in case it was missed or reverted
+                if widget.progress.value() < 100:
+                     widget.progress.setValue(100)
+                return
+
 
             if percent == -1: # Indeterminate
                 widget.progress.setRange(0, 0)
@@ -4313,94 +4597,71 @@ class ModernTranscoderUI(QMainWindow):
             if success:
                self.on_transcode_complete(0, QProcess.NormalExit, task, single_run)
             else:
-               # [NEW] Archive to _ERROR for Automated Tasks
-               source_type = task.get("source_type", "Manual")
-               src_path = task.get("source")
-               if source_type != "Manual" and src_path and os.path.exists(src_path):
-                   try:
-                       src_dir = os.path.dirname(src_path)
-                       err_dir = os.path.join(src_dir, "_ERROR")
-                       if not os.path.exists(err_dir):
-                           os.makedirs(err_dir)
-                           
-                       file_name = os.path.basename(src_path)
-                       dest_path = os.path.join(err_dir, file_name)
-                       
-                       # Collision handling
-                       if os.path.exists(dest_path):
-                            base, ext = os.path.splitext(file_name)
-                            timestamp = time.strftime("%Y%m%d_%H%M%S")
-                            dest_path = os.path.join(err_dir, f"{base}_{timestamp}{ext}")
-                       
-                       # Write Error Log to File
-                       log_path = os.path.splitext(dest_path)[0] + ".log"
-                       try:
-                           with open(log_path, 'w', encoding='utf-8') as lf:
-                               lf.write(msg)
-                       except: 
-                           pass
-                       
-                       print(f"Archiving Failed Source: {src_path} -> {dest_path}")
-                       os.rename(src_path, dest_path)
-                   except Exception as e:
-                       print(f"Error Archive Failed: {e}")
-               
-               if getattr(widget, 'lbl_status', None) and widget.lbl_status.text() == "Stopped":
-                   pass
-               else:
-                   if widget:
-                       widget.lbl_status.setText(f"Failed")
-                       widget.progress.setValue(0)
-                       widget.lbl_status.setStyleSheet("color: #ff5252;")
-                       widget.state = "failed"
-                       widget.last_error_log = msg
-                       widget.btn_transcode.setIcon(widget.create_geometric_icon("refresh", "#E0E0E0", size=24))
-                       widget.btn_transcode.setToolTip("重新轉碼 (Re-Transcode)")
-                       # TRANSITION: Failed tasks also get the X button immediately
-                       widget.btn_cancel.setIcon(widget.create_geometric_icon("close", "#ffffff", size=24))
-                       widget.btn_cancel.setToolTip("移除失敗任務 (Remove)")
+                # [NEW] Intelligent Auto-Retry for Automated Tasks (WatchFolder/Node)
+                source_type = task.get("source_type", "Manual")
+                
+                # Retry Logic
+                if source_type != "Manual" and "Cancelled" not in msg:
+                    retries = task.get("retry_count", 0)
+                    if retries < 2:
+                        task["retry_count"] = retries + 1
+                        debug_log(f"Auto-Retry Task: {task.get('base_name')} (Attempt {retries+1}) triggered by {source_type}")
+                        if widget:
+                            # [FIX] Show Reason in Retry Status
+                            short_err = msg.split('\n')[-1][:20] if msg else "Error"
+                            if "PermissionError" in msg: short_err = "Locked"
+                            
+                            widget.lbl_status.setText(f"Retrying ({retries+1}): {short_err}")
+                            widget.lbl_status.setStyleSheet("color: #ffa726;")
+                        
+                        # Do NOT archive yet. Wait for retry.
+                        QTimer.singleShot(3000, lambda: self.run_transcode(task, single_run))
+                        return
 
-                   # [NEW] Sync Mirror Widget on Failure
-                   mirror = task.get("mirror_widget")
-                   if mirror:
-                       mirror.lbl_status.setText(widget.lbl_status.text())
-                       mirror.progress.setValue(0)
-                       mirror.lbl_status.setStyleSheet(widget.lbl_status.styleSheet())
-                       mirror.state = "failed"
-                       mirror.last_error_log = msg
-                       # Sync Icon (Manually set same icon)
-                       mirror.btn_transcode.setIcon(widget.create_geometric_icon("refresh", "#E0E0E0", size=24))
-                       mirror.btn_cancel.setIcon(widget.create_geometric_icon("close", "#ffffff", size=24))
-                   print(f"Transcode Failed: {msg}")
-                   
-                   # [NEW] Intelligent Auto-Retry for Automated Tasks (WatchFolder/Node)
-                   source_type = task.get("source_type", "Manual")
-                   if source_type != "Manual" and "Cancelled" not in msg:
-                       retries = task.get("retry_count", 0)
-                       if retries < 2:
-                           task["retry_count"] = retries + 1
-                           debug_log(f"Auto-Retry Task: {task.get('base_name')} (Attempt {retries+1}) triggered by {source_type}")
-                           if widget:
-                               widget.lbl_status.setText(f"Retrying ({retries+1})")
-                               widget.lbl_status.setStyleSheet("color: #ffa726;")
-                           QTimer.singleShot(3000, lambda: self.run_transcode(task, single_run))
-                           return
+                # [NEW] Archive to _ERROR ONLY AFTER Retries Exhausted
+                src_path = task.get("source")
+                if source_type != "Manual" and src_path and os.path.exists(src_path):
+                    try:
+                        src_dir = os.path.dirname(src_path)
+                        err_dir = os.path.join(src_dir, "_ERROR")
+                        if not os.path.exists(err_dir):
+                            os.makedirs(err_dir)
+                            
+                        file_name = os.path.basename(src_path)
+                        dest_path = os.path.join(err_dir, file_name)
+                        
+                        # Collision handling
+                        if os.path.exists(dest_path):
+                             base, ext = os.path.splitext(file_name)
+                             timestamp = time.strftime("%Y%m%d_%H%M%S")
+                             dest_path = os.path.join(err_dir, f"{base}_{timestamp}{ext}")
+                        
+                        # Write Error Log to File
+                        log_path = os.path.splitext(dest_path)[0] + ".log"
+                        try:
+                            with open(log_path, 'w', encoding='utf-8') as lf:
+                                lf.write(msg)
+                        except: 
+                            pass
+                        
+                        print(f"Archiving Failed Source: {src_path} -> {dest_path}")
+                        os.rename(src_path, dest_path)
+                    except Exception as e:
+                        print(f"Error Archive Failed: {e}")
 
-                   # Diagnosis moved to Re-transcode button click
-            
-               # CLEANUP WORKER IN FAILURE PATH
-               if widget in self.workers:
-                   worker = self.workers.pop(widget)
-                   try:
-                       worker.progress_signal.disconnect()
-                       worker.finished_signal.disconnect()
-                   except: pass
-                   worker.deleteLater()
+            # CLEANUP WORKER IN FAILURE PATH
+            if widget in self.workers:
+                worker = self.workers.pop(widget)
+                try:
+                    worker.progress_signal.disconnect()
+                    worker.finished_signal.disconnect()
+                except: pass
+                worker.deleteLater()
 
-               if not single_run:
-                   self.process_next_task()
-               else:
-                   self.is_processing = False
+            if not single_run:
+                self.process_next_task()
+            else:
+                self.is_processing = False
         except Exception as e:
             debug_log(f"on_transcode_finished_worker Critical Error: {e}\n{traceback.format_exc()}")
             # Critical protection: always cleanup worker on error
@@ -4501,28 +4762,8 @@ class ModernTranscoderUI(QMainWindow):
                     speed_x = target_duration / (duration_sec if duration_sec > 0 else 1)
                     speed_text += f" ({speed_x:.1f}x)"
                 
-                widget.lbl_status.setText("完成 (Done)")
-                widget.lbl_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
-                widget.progress.setValue(100)
-                widget.progress.setStyleSheet("QProgressBar::chunk { background-color: #4CAF50; }") # Green
-                
-                # Update Info Label with Speed
-                current_info = widget.lbl_info.text()
-                widget.lbl_info.setText(f"{current_info}  |  ⏱️ {speed_text}")
-                
-                # Mirror to Dashboard (if exists and linked)
-                # Mirror to Dashboard (if exists and linked)
-                # [FIX] Mirror Widget safety check with try-except to prevent crash on missing worker_id
-                try:
-                    w_id = task.get("worker_id", "Manual")
-                    # Handle case where worker_id might be "Auto" or "AUTO" which aren't in self.workers
-                    if w_id in self.workers:
-                        mirror = self.workers[w_id].get("mirror_widget")
-                        if mirror and shiboken6.isValid(mirror):
-                             mirror.update_status("Completed", 100)
-                             mirror.lbl_speed.setText(speed_text)
-                except Exception as e:
-                    print(f"DEBUG: Mirror update skipped for worker {task.get('worker_id')}: {e}")
+                # [REMOVED] Manual UI Update - Now handled by set_done after file move
+                # [REMOVED] Mirror Update - Now handled by set_done after file move
                 
                  # Add to History (Only if successful)
                 # [NEW] Move from _TEMP to Final Output Directory (for watch folder tasks)
@@ -4558,17 +4799,31 @@ class ModernTranscoderUI(QMainWindow):
                         # 如果移動失敗，保持在 _TEMP（至少轉碼成功了）
                         pass
                 
-                self.add_to_history(task["source_path"], output_path, speed_text)
+                # [FIX] Final UI Update via set_done to ensure 100% and Play Button
+                widget.set_done(output_path, self.player, speed_text)
+                
+                # Mirror Update
+                try:
+                    mirror = task.get("mirror_widget")
+                    import shiboken6
+                    if mirror and shiboken6.isValid(mirror):
+                         mirror.set_done(output_path, self.player, speed_text)
+                except: pass
+
+                # [FIX] Unify source key (Watch tasks use 'source', others may use 'source_path')
+                rec_source = task.get("source") or task.get("source_path")
+                self.add_to_history(rec_source, output_path, speed_text)
                 
                 # Check Auto-Play
-                if self.chk_auto_play.isChecked():
+                # [FIX] Safety check for missing UI element
+                if hasattr(self, 'chk_auto_play') and self.chk_auto_play.isChecked():
                     if os.path.exists(output_path):
                         self.on_video_loaded(output_path, is_result=True)
             
                 # [NEW] Auto-Archive Source File (Watch Folder / Automation Only)
                 # Requirement: Move completed task source to _DONE or _ERROR
                 source_type = task.get("source_type", "Manual")
-                src_path = task.get("source_path")
+                src_path = task.get("source") or task.get("source_path")
                 
                 if source_type != "Manual" and src_path and os.path.exists(src_path):
                      try:
@@ -4829,6 +5084,10 @@ class ModernTranscoderUI(QMainWindow):
              
         if self.pending_tasks:
              self.btn_start_all.setEnabled(True)
+             
+             # [FIX] Auto-Resume: Trigger queue to pick up restored 'Claimed' or 'Pending' tasks
+             # This handles the case where app crashed while processing.
+             QTimer.singleShot(1000, self.process_next_task)
 
     def check_dongle_status(self):
         """Asynchronously check lock status to prevent stuttering."""
@@ -4885,31 +5144,7 @@ class ModernTranscoderUI(QMainWindow):
 
         QTimer.singleShot(500, self.start_transcoding_queue)
 
-    def on_watch_folder_detected(self, file_path, folder_name):
-        """Handler for automated folder monitoring detections."""
-        print(f"WatchFolder Trigger: Received Signal for {file_path}")
-        
-        # Find preset for this folder
-        watch_folders = self.settings.get("watch_folders", [])
-        preset_name = None
-        for wf in watch_folders:
-            if wf.get("name") == folder_name:
-                preset_name = wf.get("preset")
-                break
-        
-        print(f"WatchFolder Trigger: Adding Task. Preset={preset_name}")
-        # Add to queue automatically
-        self.add_task_to_queue(
-            source_path=file_path, 
-            full_duration=True, 
-            source_type=folder_name, 
-            worker_id="AUTO", 
-            preset_name=preset_name
-        )
-        
-        # Start immediately
-        print("WatchFolder Trigger: Launching Transcode Queue...")
-        QTimer.singleShot(500, self.start_transcoding_queue)
+
 
     def on_watch_config_synced(self, remote_config):
         """Updates local settings with Master's broadcasted watch folder config."""
@@ -4938,11 +5173,24 @@ class ModernTranscoderUI(QMainWindow):
         assigned_to = task_data.get("assigned_to")
 
         
+        # [FIX] Robust Matching Logic using MD5 Filename (Path Agnostic)
+        target_filename = task_data.get("cluster_filename")
         existing_task = None
+        
+        # 1. Try Match by Cluster Filename (Best)
         for t in self.pending_tasks:
-            if t.get("base_name") == base_name and t.get("node_origin") == origin:
+            if t.get("cluster_filename") == target_filename:
                 existing_task = t
                 break
+        
+        # 2. Fallback: Match by Hash Seed (BaseName + Origin)
+        # Only if filename match failed (legacy tasks?)
+        if not existing_task:
+            for t in self.pending_tasks:
+                if t.get("base_name") == base_name:
+                    # [FIX] Aggressive Match: If name matches, it's the same task.
+                    existing_task = t
+                    break
                 
         if existing_task:
             # Update Existing Task
@@ -4951,6 +5199,12 @@ class ModernTranscoderUI(QMainWindow):
             if "progress" in task_data: existing_task["progress"] = task_data["progress"]
             existing_task["assigned_to"] = assigned_to # [NEW] Sync this!
 
+            # [FIX] Immediate Trigger for assigned tasks
+            # If this task is assigned to ME and is Pending, process it NOW.
+            if assigned_to == self.cluster_mgr.node_id and (task_data.get("status") == "Pending" or not task_data.get("status")):
+                 print(f"Cluster: Task assigned to me detected: {base_name}. Triggering Queue.")
+                 QTimer.singleShot(100, self.process_next_task)
+
             
             # Update UI Widget
             widget = existing_task.get("widget")
@@ -4958,13 +5212,26 @@ class ModernTranscoderUI(QMainWindow):
                 # Sync Status Label
                 status_text = task_data.get("status", "Pending")
                 
+                # [NEW] Resolve Node Info for Dashboard
+                origin_node = task_data.get("node_origin")
+                origin_info = self.cluster_mgr._known_nodes.get(origin_node, {})
+                origin_ip = origin_info.get("ip", "Unknown")
+                
+                # Update Source Label (Column 5) -> IP
+                # If WatchFolder, maybe keep [监控] prefix? User asked for IP.
+                # Let's format it: "[IP] 192.168.x.x"
+                widget.lbl_source_tag.setText(origin_ip)
+                widget.lbl_source_tag.setToolTip(f"Source Node ID: {origin_node}")
+
                 # [NEW] Remote Claiming Visibility / Assignment Display
                 claimed_by = task_data.get("claimed_by") or assigned_to
                 if claimed_by:
-
-                     # If remote node claimed it, show Node info
-                     display_node = claimed_by.split('-')[0]
-                     widget.lbl_node.setText(display_node)
+                     # Resolve Alias
+                     claimer_info = self.cluster_mgr._known_nodes.get(claimed_by, {})
+                     # Default to ID if alias missing (e.g. older version)
+                     display_alias = claimer_info.get("alias", str(claimed_by))
+                     
+                     widget.lbl_node.setText(display_alias)
                      widget.lbl_node.setStyleSheet("color: #BB86FC; font-weight: bold;")
                      if status_text == "Pending": status_text = "Claimed"
                      
@@ -4993,25 +5260,72 @@ class ModernTranscoderUI(QMainWindow):
                     # [FIX] Also remove from pending if finished elsewhere
                     if existing_task in self.pending_tasks:
                         self.pending_tasks.remove(existing_task)
-                        self.process_next_task()
+                    if status_text == "Done" or status_text == "Failed":
+                        # [FIX] Move to History List (User Request #3)
+                        # Find which list it is in (Manual or Auto)
+                        current_list = None
+                        current_item = None
+                        
+                        # Search in Manual List
+                        for i in range(self.manual_task_list.count()):
+                            it = self.manual_task_list.item(i)
+                            if self.manual_task_list.itemWidget(it) == widget:
+                                current_list = self.manual_task_list
+                                current_item = it
+                                break
+                        
+                        # Search in Auto List (if mirror or remote)
+                        if not current_list and hasattr(self, 'auto_task_list'):
+                             for i in range(self.auto_task_list.count()):
+                                 it = self.auto_task_list.item(i)
+                                 if self.auto_task_list.itemWidget(it) == widget:
+                                     current_list = self.auto_task_list
+                                     current_item = it
+                                     break
 
-                    if status_text == "Done":
-                        widget.lbl_status.setText("Done")
-                        widget.lbl_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
-                        widget.progress.setStyleSheet("QProgressBar::chunk { background-color: #4CAF50; }")
-                    elif status_text == "Failed":
-                        widget.lbl_status.setText("Failed")
-                        widget.lbl_status.setStyleSheet("color: #F44336; font-weight: bold;")
-                        widget.progress.setStyleSheet("QProgressBar::chunk { background-color: #d32f2f; }")
+                        if current_list and current_item:
+                            # Remove from Active Queue
+                            row = current_list.row(current_item)
+                            current_list.takeItem(row)
+                            
+                            # Add to History List
+                            # Clean up Widget Buttons
+                            widget.btn_transcode.hide() # Hide Refresh/Resume
+                            widget.btn_cancel.hide()    # Hide Remove
+                            widget.btn_play_result.show() # Ensure Play button visible if Done
+                            if status_text == "Failed": widget.btn_play_result.hide()
+                            
+                            # Create new Item for History
+                            new_item = QListWidgetItem(self.history_list)
+                            new_item.setSizeHint(QSize(0, 36))
+                            self.history_list.addItem(new_item)
+                            self.history_list.setItemWidget(new_item, widget)
+                            
+                            # Visual Style for History
+                            widget.setStyleSheet("QFrame#TaskRow { background-color: #222; } QLabel { color: #888; }")
+                            if status_text == "Done":
+                                widget.lbl_status.setText("完成 (Done)")
+                                widget.lbl_status.setStyleSheet("color: #4CAF50; font-weight: normal;")
+                            
+                        # Also remove from pending if finished elsewhere
+                        if existing_task in self.pending_tasks:
+                            self.pending_tasks.remove(existing_task)
+                            self.process_next_task()
+
                     
             return
 
         # New Task - verification
         source_path = task_data.get("source")
+        task_base = task_data.get("base_name")
         
+        # [FIX] strict validation to prevent empty rows
+        if not source_path or not task_base:
+            debug_log(f"Cluster: Ignoring Malformed Task Data (Missing source/name): {task_data}")
+            return
+
         # [FIX] Enhanced Ghost Task Filtering
         # 1. Check if we deleted it locally this session
-        task_base = task_data.get("base_name")
         b_time = task_data.get("broadcast_time", "0")
         unique_key = f"{task_base}|{b_time}"
         
@@ -5024,40 +5338,77 @@ class ModernTranscoderUI(QMainWindow):
             return
 
         # 2. Check Local Ownership (Watch Folder)
-        # 1. Existence Check: If file deleted locally, trust local state
-        if source_path and not os.path.exists(source_path):
-            # Allow network paths if they are reachable, but if locally unreachable, skip
-            debug_log(f"Cluster: Ignoring Task (File Not Found): {source_path}")
-            return
+        # [FIX] Removed strict file existence check for Dashboard Visualization
+        # We want to see the task even if we can't access the file locally
+        # if source_path and not os.path.exists(source_path):
+        #    ...
+
 
         # [FIX] Deduplication: Check if we are already processing this SOURCE FILE
         # (regardless of who sent it or what the task name is)
         norm_source = os.path.normpath(source_path).lower() if source_path else ""
         
-        # Check Pending
-        for t in self.pending_tasks:
-             if t.get("source") and os.path.normpath(t.get("source")).lower() == norm_source:
-                  debug_log(f"Cluster: Ignoring Duplicate (Already Pending): {source_path}")
-                  return
-                  
-        # Check Running
-        for w in self.workers:
-             t = getattr(w, 'task_data', {})
-             if t.get("source") and os.path.normpath(t.get("source")).lower() == norm_source:
-                  debug_log(f"Cluster: Ignoring Duplicate (Already Running): {source_path}")
-                  return
-
-
-        # 2. Ownership Check: [REMOVED] Per user request, allow shared paths.
-        # Ownership is now managed by the atomic claiming mechanism.
+        # [FIX] CRITICAL: UI-Based Deduplication (The Source of Truth)
+        # Check if this task exists ANYWHERE in the dashboard lists.
+        # This covers Pending, Processing (Local), Processing (Remote), Claimed, etc.
         
-        # 3. Hostname Check (already in ClusterManager, but double safety here)
+        all_lists = [self.manual_task_list]
+        if hasattr(self, 'auto_task_list'): all_lists.append(self.auto_task_list)
+        
+        for lst in all_lists:
+            for i in range(lst.count()):
+                it = lst.item(i)
+                w = lst.itemWidget(it)
+                if w:
+                    existing_data = getattr(w, 'task_data', {})
+                    # Strict Name Check (Case-insensitive just in case)
+                    if existing_data.get("base_name", "").strip() == task_base.strip():
+                        # print(f"Cluster: Ignoring Duplicate (Found in UI): {task_base}")
+                        return
+
+        # Check History (Don't resurrect finished tasks)
+        for i in range(self.history_list.count()):
+            it = self.history_list.item(i)
+            w = self.history_list.itemWidget(it)
+            if w:
+                hist_data = getattr(w, 'task_data', {})
+                if hist_data.get("base_name", "").strip() == task_base.strip():
+                    return
+
+        # Double check active workers (just in case UI is lagging)
+        for w in self.workers.values():
+             t = getattr(w, 'task_data', {})
+             if t.get("base_name", "").strip() == task_base.strip():
+                  return
+
+
         # Passed -> Add to Queue
         print(f"Cluster: New Task from {origin}")
         
         # [NEW] Pre-populate node info if already claimed
         claimed_by = task_data.get("claimed_by")
-        source_type = f"Node:{origin}"
+        
+        # [FIX] User Request #4: Source refers to "Monitor" or "Manual"
+        # We trust the data sent by the originator
+        source_type = task_data.get("source_type", "WatchFolder")
+        
+        # [FIX] User Request #5: Node refers to Master/Worker1...
+        # Resolved via Alias lookup
+         
+        self.add_task_to_queue(
+            source_path=source_path,
+            full_duration=True,
+            source_type=source_type, # Correct Source Type
+            worker_id="Cluster",
+            base_name_override=task_base, # Preserve exact name
+            extra_data={
+                "broadcast_time": b_time,
+                "node_origin": origin,
+                "cluster_filename": task_data.get("cluster_filename"),
+                "claimed_by": claimed_by, # [NEW] Pass claiming info
+                "assigned_to": assigned_to # [NEW] Pass assignment info
+            }
+        )
         
         self.add_task_to_queue(
             source_path=source_path,
@@ -5189,6 +5540,32 @@ class ModernTranscoderUI(QMainWindow):
              print("Requesting Resume...")
              self.workers[widget].resume()
 
+    def on_cluster_role_changed(self, new_role):
+        """Called when Cluster Manager detects a role change (Master <-> Worker)."""
+        print(f"DEBUG_UI: Cluster Role Changed to {new_role}")
+        
+        # [FIX] Global Settings Sync
+        # Ensure the UI reflects the REAL role determined by leader election.
+        self.settings.set("cluster_role", new_role)
+        
+        # [FIX] Refresh Cluster Status Page
+        if hasattr(self, 'refresh_cluster_ui'):
+            self.refresh_cluster_ui()
+        
+        # [FIX] Dynamic Watch Engine Control
+        # If we become Worker, STOP the engine immediately to prevent duplicate tasks.
+        if hasattr(self, 'watch_engine'):
+            if new_role == "Worker":
+                if self.watch_engine.isRunning():
+                    print("DEBUG_UI: Role Downgrade -> Stoppping Watch Engine")
+                    self.watch_engine.stop()
+            elif new_role == "Master":
+                 # Always start engine if Master. It handles empty lists safely.
+                 # This ensures if user adds folders later, engine is already running.
+                 if not self.watch_engine.isRunning():
+                     print("DEBUG_UI: Role Upgrade -> Starting Watch Engine (Always)")
+                     self.watch_engine.start()
+                     
     def stop_current_task(self, widget):
         if widget in self.workers:
             print("Requesting Stop...")
@@ -5203,5 +5580,9 @@ class ModernTranscoderUI(QMainWindow):
             
             # Refresh specific row or whole list? simple refresh whole list
             self.refresh_watch_list_ui()
+            
+            # [FIX] Push new config to Cluster Worker so it syncs to other nodes (if Master)
+            if hasattr(self, 'cluster_mgr'):
+                 self.cluster_mgr.update_worker_settings({"watch_folders": watch_folders})
             
             # Engine handles the "enabled" flag dynamically in its loop

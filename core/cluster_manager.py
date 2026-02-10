@@ -5,6 +5,7 @@ import datetime
 import time
 from PySide6.QtCore import QObject, QTimer, Signal
 import psutil
+import random # [NEW] For backoff
 from core.settings import CURRENT_VERSION
 
 class ClusterWorker(QObject):
@@ -14,6 +15,7 @@ class ClusterWorker(QObject):
     task_synced = Signal(dict)
     node_updated = Signal(dict)
     watch_config_synced = Signal(list) # [NEW] Signal for synced watch folders
+    role_changed = Signal(str) # [NEW] Signal for role change
     finished = Signal()
 
     def __init__(self, cluster_path, node_id, settings_dict):
@@ -29,6 +31,7 @@ class ClusterWorker(QObject):
         self.current_activity = "Idle"
         self.active_task_count = 0 # [NEW] Track count for load balancing
         self.total_ram_gb = round(psutil.virtual_memory().total / (1024**3), 1)
+        self._first_sync = True # [FIX] Ensure we emit role on first run
 
 
     def run_loop(self):
@@ -138,7 +141,9 @@ class ClusterWorker(QObject):
         # Condition B: No lock OR Stale lock -> Claim it
         elif not os.path.exists(lock_file) or lock_stale:
             # Try to claim (first come first served)
-            # In a heavy race, file system locking would be better, but this is sufficient for this scale.
+            # Random backoff to reduce collision on simultaneous start
+            time.sleep(random.uniform(0.1, 0.5))
+            
             self._write_master_lock(lock_file, now)
             # Re-read to confirm we won the race
             try:
@@ -148,19 +153,39 @@ class ClusterWorker(QObject):
                     my_role = "Master"
             except:
                 pass # Failed to verification, fallback to Worker
+            
+        # [FIX] Global Split-Brain Resolution (Always Run)
+        # Even if we hold the lock, we must check if someone else is also acting as Master (e.g. forced by User or clock skew)
+        if my_role == "Master":
+             for other_id, data in self._known_nodes.items():
+                 if other_id == self.node_id: continue
+                 if data.get("role") == "Master" and data.get("status") == "Online":
+                     # CONFLICT DETECTED: Two Masters!
+                     print(f"Cluster: Split-Brain Detected! Me({self.node_id}) vs Other({other_id})")
+                     
+                     # Tie-Breaker: Lower Node ID Yields (Backs off)
+                     if self.node_id < other_id:
+                         print("Cluster: I am yielding Master role (Tie-Breaker).")
+                         my_role = "Worker" # Downgrade immediately
+                         break
+                     else:
+                         print("Cluster: I am keeping Master role (Tie-Breaker).")
+            
+            # 3. Apply Role
                 
         # 3. Apply Role
         # Update settings dict in memory (not disk, to avoid settings thrashing) only if changed
         current_stored = self.settings.get("cluster_role", "Worker")
         
-        if current_stored != my_role:
-            print(f"Cluster: Role Auto-Switched to {my_role}")
+        if current_stored != my_role or self._first_sync:
+            print(f"Cluster: Role Synced to {my_role} (Changed or First Run)")
             self.settings["cluster_role"] = my_role # Update local thread copy
             
             # Persist to real settings via Main Thread Signal? 
             # Actually, better to just emit a signal and let Main Window handle the state change.
             # But for heartbeat, we need to know NOW.
-            pass
+            self.role_changed.emit(my_role)
+            self._first_sync = False
 
     def _write_master_lock(self, lock_file, timestamp):
         data = {
@@ -171,6 +196,8 @@ class ClusterWorker(QObject):
         try:
             with open(lock_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f)
+                f.flush()
+                os.fsync(f.fileno()) # [FIX] Force write to disk/network
         except Exception as e:
              print(f"Cluster: Failed to write lock: {e}")
 
@@ -195,7 +222,8 @@ class ClusterWorker(QObject):
             "ram_usage": ram,
             "total_ram": self.total_ram_gb,
             "current_activity": self.current_activity,
-            "active_task_count": self.active_task_count # [NEW] Crucial for Load Balancing
+            "active_task_count": self.active_task_count, # [NEW] Crucial for Load Balancing
+            "alias": f"{self.settings.get('cluster_role', 'Worker')}-{str(self.node_id)[-2:]}" if self.settings.get('cluster_role') != 'Master' else "Master"
         }
         try:
             # Atomic Write (Temp file -> Rename) could be better, but 'w' is okay for now
@@ -242,6 +270,19 @@ class ClusterWorker(QObject):
             # 2. Calculate Score (Tasks ASC, CPU ASC)
             score = (data.get("active_task_count", 0) * 100) + data.get("cpu_usage", 0)
             workers.append({"id": nid, "score": score, "data": data})
+            
+        # [FIX] Guarantee Master is a candidate (Self-Injection)
+        # Even if file system sync is slow, Master knows it exists.
+        if self.node_id not in [w["id"] for w in workers]:
+            # Construct self-data
+            self_data = {
+                "node_id": self.node_id,
+                "status": "Online",
+                "active_task_count": self.active_task_count,
+                "cpu_usage": 0 # Assume low priority if not polled yet
+            }
+            score = (self.active_task_count * 100)
+            workers.append({"id": self.node_id, "score": score, "data": self_data})
             
         if not workers: return # No workers to assign to
         
@@ -421,7 +462,8 @@ class ClusterManager(QObject):
         # Pass raw dict of settings needed
         settings_snapshot = {
             "cluster_sync_tasks": self.settings.get("cluster_sync_tasks", True),
-            "cluster_role": self.settings.get("cluster_role", "Master")
+            "cluster_role": self.settings.get("cluster_role", "Master"),
+            "watch_folders": self.settings.get("watch_folders", []) # [FIX] Include watch_folders for Master Sync
         }
         
         self.worker = ClusterWorker(self._cluster_path, self.node_id, settings_snapshot)
@@ -432,6 +474,7 @@ class ClusterManager(QObject):
         self.worker.task_synced.connect(self.task_synced)
         self.worker.node_updated.connect(self._on_node_updated) # Cache locally
         self.worker.watch_config_synced.connect(self.watch_config_synced) # [NEW]
+        self.worker.role_changed.connect(self.role_changed) # [NEW] Re-emit
         self.worker.finished.connect(self.thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
@@ -504,11 +547,25 @@ class ClusterManager(QObject):
     def broadcast_task(self, task):
         """Post a local task to the cluster."""
         # Main thread write is okay for singular events
-        # Re-using the logic from before, but simplified
         try:
-            task_name = task.get('base_name', 'Task')
-            sanitized_name = "".join([c if c.isalnum() or c in ".-_" else "_" for c in task_name])
-            filename = f"{sanitized_name}_{int(time.time() * 1000)}.json"
+            import hashlib
+            source_path = task.get("source") or task.get("source_path") or task.get("base_name")
+            if not source_path: return None
+            
+            # [FIX] Path-Agnostic Deduplication (Handle Mapped Drives D: vs Z:)
+            # Use BaseName + Size to identify "Same File" across different mount points
+            base_name = task.get('base_name', 'Task')
+            size = task.get('size', 0)
+            
+            # Robustness: If size is 0 (unlikely for ready file), fallback to path basename
+            hash_seed = f"{base_name}_{size}"
+            
+            # [FIX] Deterministic Hash
+            path_hash = hashlib.md5(hash_seed.encode('utf-8')).hexdigest()[:12]
+            
+            # keeping base_name in filename for readability
+            sanitized_name = "".join([c if c.isalnum() or c in ".-_" else "_" for c in base_name])
+            filename = f"{sanitized_name}_{path_hash}.json"
             
             # Ensure dir exists (Worker might not have created it yet if called immediately)
             tasks_dir = os.path.join(self._cluster_path, "tasks")
@@ -516,14 +573,73 @@ class ClusterManager(QObject):
             
             task_file = os.path.join(tasks_dir, filename)
             
-            cluster_task = task.copy()
-            cluster_task["node_origin"] = self.node_id
-            cluster_task["cluster_status"] = "Pending"
+            # [FIX] Simplified Broadcast Logic
+            # Trust the Hash ID. If file exists, we assume it's the correct task.
+            if os.path.exists(task_file):
+                 try:
+                     with open(task_file, 'r', encoding='utf-8') as f:
+                         existing = json.load(f)
+                     
+                     # [FIX] Merge instead of Overwrite (Prevent Metadata Loss)
+                     # Only update fields provided in the new task
+                     # But preserve "claimed_by" and "status" if they are advanced?
+                     
+                     # If existing is Running/Done, we generally don't want to reset it 
+                     # UNLESS this is a forced re-broadcast from Master?
+                     if existing.get("cluster_status") not in ["Pending", "Failed"]:
+                         # If it's running, don't mess with it unless we are trying to stop it?
+                         return filename
+
+                     # Merge
+                     existing.update(task)
+                     # Ensure essential fields
+                     existing["cluster_status"] = "Pending" 
+                     existing["broadcast_time"] = datetime.datetime.now().isoformat()
+                     
+                     cluster_task = existing
+                 except: 
+                     # Corrupt file? Overwrite
+                     cluster_task = task.copy()
+                     cluster_task["cluster_status"] = "Pending"
+            else:
+                 cluster_task = task.copy()
+                 cluster_task["node_origin"] = self.node_id 
+                 cluster_task["cluster_status"] = "Pending"
+            
+            cluster_task["node_origin"] = self.node_id # Ensure origin is accurate
             cluster_task["broadcast_time"] = datetime.datetime.now().isoformat()
             if "widget" in cluster_task: del cluster_task["widget"]
-                
+            
+            # [FIX] Immediate Assignment (User request: "Task generation -> Assign WORKER")
+            # Don't wait for Load Balancer cycle. Assign immediately if possible.
+            if not cluster_task.get("assigned_to") and not cluster_task.get("claimed_by"):
+                # Find active workers
+                try:
+                    candidates = []
+                    now = datetime.datetime.now()
+                    for nid, n_data in self._known_nodes_cache.items():
+                        # Basic liveness check (30s)
+                        last_seen = datetime.datetime.fromisoformat(n_data.get("last_seen", now.isoformat()))
+                        if (now - last_seen).total_seconds() < 30:
+                            role = n_data.get("role", "Master")
+                            # Prefer Workers, but include Master if no workers available
+                            if role == "Worker":
+                                candidates.insert(0, nid)  # Workers at front
+                            elif role == "Master":
+                                candidates.append(nid)  # Master as fallback
+                    
+                    if candidates:
+                        # Simple Random Distribution for statelessness
+                        import random
+                        chosen = random.choice(candidates)
+                        cluster_task["assigned_to"] = chosen
+                        print(f"ClusterManager: Immediately assigned task to {chosen}")
+                except Exception as e:
+                    print(f"ClusterManager: Assignment Error - {e}")
+
+            # Write to Shared Storage
             with open(task_file, "w", encoding="utf-8") as f:
-                json.dump(cluster_task, f, ensure_ascii=False, indent=2)
+                json.dump(cluster_task, f, indent=2, ensure_ascii=False)
             
             return filename
         except Exception as e:

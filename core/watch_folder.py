@@ -16,7 +16,7 @@ class WatchFolderEngine(QThread):
         super().__init__(parent)
         self.settings = settings_manager
         self.processed_db_path = os.path.join(os.getcwd(), "watch_folder_history.json")
-        self.processed_files = self.load_history()
+        self.processed_files = self.load_history() # Now a dict {path: mtime}
         self.is_running = False
         self._snapshot_requested = False # Flag for async request
 
@@ -28,15 +28,33 @@ class WatchFolderEngine(QThread):
         if os.path.exists(self.processed_db_path):
             try:
                 with open(self.processed_db_path, "r", encoding="utf-8") as f:
-                    return set(json.load(f))
+                    data = json.load(f)
+                    
+                    # [MIGRATION] Convert old list format to dict
+                    if isinstance(data, list):
+                        new_db = {}
+                        for path in data:
+                            # If file exists, grab its current mtime to avoid immediate re-process
+                            # If not, use 0
+                            try:
+                                if os.path.exists(path):
+                                    new_db[path] = os.path.getmtime(path)
+                                else:
+                                    new_db[path] = 0
+                            except:
+                                new_db[path] = 0
+                        return new_db
+                    elif isinstance(data, dict):
+                        return data
+                    return {}
             except:
-                return set()
-        return set()
+                return {}
+        return {}
 
     def save_history(self):
         try:
             with open(self.processed_db_path, "w", encoding="utf-8") as f:
-                json.dump(list(self.processed_files), f, ensure_ascii=False, indent=2)
+                json.dump(self.processed_files, f, ensure_ascii=False, indent=2)
         except:
             pass
 
@@ -81,7 +99,6 @@ class WatchFolderEngine(QThread):
                 continue
                 
             if not path or not os.path.exists(path):
-                # print(f"WatchFolderEngine: Path not found or invalid: {path}")
                 continue
             
             try:
@@ -108,13 +125,24 @@ class WatchFolderEngine(QThread):
                     # Avoid temp files (hidden or starting with . or ~)
                     if filename.startswith(".") or filename.startswith("~$"):
                         continue
+                        
+                    # [FIX] Check mtime for duplicates/updates
+                    try:
+                        current_mtime = os.path.getmtime(file_path)
+                    except:
+                        continue # File might be locked or gone
 
-                    if file_path not in self.processed_files:
-                        print(f"WatchFolderEngine: Checking potential file: {filename}")
+                    # If file not in DB OR mtime changed -> Process
+                    last_mtime = self.processed_files.get(file_path, -1)
+                    
+                    # Fuzzy match for float precision issues (optional, but == usually check exact matches)
+                    # Let's use exact inequality for now.
+                    if last_mtime != current_mtime:
+                        print(f"WatchFolderEngine: Checking potential file: {filename} (New/Modified)")
                         # Stability check: ensure file is not being copied
                         if self.is_file_ready(file_path):
                             print(f"WatchFolderEngine: NEW FILE READY: {filename}")
-                            self.processed_files.add(file_path)
+                            self.processed_files[file_path] = current_mtime
                             self.save_history()
                             self.file_detected.emit(file_path, wf.get("name", "WatchFolder"))
                         else:

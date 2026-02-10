@@ -22,6 +22,7 @@ class Transcoder:
     def _resolve_tool(self, tool_name):
         # 1. Bundled (PyInstaller _internal) or Development
         # Check adjacent to sys.executable (The .exe file)
+        scan_paths = []
         if getattr(sys, 'frozen', False):
             exe_dir = os.path.dirname(sys.executable)
             
@@ -35,10 +36,14 @@ class Transcoder:
             # Also check MEIPASS if we happened to bundle it (future proof)
             if hasattr(sys, '_MEIPASS'):
                  scan_paths.append(os.path.join(sys._MEIPASS, 'core', tool_name))
+                 # Fallback: check root of MEIPASS
+                 scan_paths.append(os.path.join(sys._MEIPASS, tool_name))
             
             for p in scan_paths:
                 if os.path.exists(p):
                     return p
+                    
+            debug_log(f"WARNING: Count not find {tool_name} in scanned paths: {scan_paths}")
                     
         # 2. Local Dev (Explicit Project Path? No, usually in PATH or bin)
         # 3. Fallback to System PATH
@@ -94,8 +99,9 @@ class Transcoder:
         cmd += ["-pix_fmt", "yuv420p"] # Standard for compatibility
         
         # Resolution
-        if params.get("resolution"):
-            cmd += ["-s", params["resolution"]]
+        res = params.get("resolution")
+        if res and str(res).strip() != "-" and "x" in str(res):
+            cmd += ["-s", str(res)]
             
         # FPS
         if params.get("fps"):
