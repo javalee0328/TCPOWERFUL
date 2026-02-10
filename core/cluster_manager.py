@@ -36,6 +36,7 @@ class ClusterWorker(QObject):
 
     def run_loop(self):
         """Main loop for the worker thread."""
+        print(f"ClusterWorker: Thread Started. ID={self.node_id}")
         self.initialize_structure()
         
         while self.running:
@@ -43,16 +44,20 @@ class ClusterWorker(QObject):
                 self.sync()
             except Exception as e:
                 print(f"ClusterWorker: Cycle Error - {e}")
+                import traceback
+                traceback.print_exc()
             
             # Sleep 5s (but check running flag frequently)
             for _ in range(50): 
                 if not self.running: break
                 time.sleep(0.1)
                 
+        print("ClusterWorker: Thread Finished.")
         self.finished.emit()
 
     def stop(self):
         self.running = False
+        print("ClusterWorker: Stop Requested.")
 
     def set_activity(self, activity, count=0):
         self.current_activity = activity
@@ -74,6 +79,7 @@ class ClusterWorker(QObject):
                 path = os.path.join(self._cluster_path, sub)
                 if not os.path.exists(path):
                     os.makedirs(path)
+            print(f"ClusterWorker: Initialized structure at {self._cluster_path}")
         except Exception as e:
             print(f"ClusterWorker: Init Error - {e}")
 
@@ -223,22 +229,30 @@ class ClusterWorker(QObject):
             "total_ram": self.total_ram_gb,
             "current_activity": self.current_activity,
             "active_task_count": self.active_task_count, # [NEW] Crucial for Load Balancing
-            "alias": f"{self.settings.get('cluster_role', 'Worker')}-{str(self.node_id)[-2:]}" if self.settings.get('cluster_role') != 'Master' else "Master"
+            "alias": self.settings.get("worker_alias") or (f"{self.settings.get('cluster_role', 'Worker')}-{str(self.node_id)[-2:]}" if self.settings.get('cluster_role') != 'Master' else "Master")
         }
         try:
             # Atomic Write (Temp file -> Rename) could be better, but 'w' is okay for now
             # On network shares, sometimes direct write is safer than rename due to perms
+            # Atomic Write (Temp file -> Rename) could be better, but 'w' is okay for now
+            # On network shares, sometimes direct write is safer than rename due to perms
             with open(node_file, "w", encoding="utf-8") as f:
                 json.dump(hb_data, f, indent=2)
-        except: pass
+            # print(f"Cluster: Heartbeat updated for {self.node_id}") 
+        except Exception as e:
+            print(f"Cluster: Heartbeat Error - {e}")
 
     def _discover_nodes(self):
         node_dir = os.path.join(self._cluster_path, "nodes")
-        if not os.path.exists(node_dir): return
+        if not os.path.exists(node_dir):
+             print(f"Cluster: Node dir missing: {node_dir}")
+             return
         
         # Read all Valid JSONs
-        for filename in os.listdir(node_dir):
-            if not filename.endswith(".json"): continue
+        cluster_nodes = [f for f in os.listdir(node_dir) if f.endswith(".json")]
+        # print(f"Cluster: Discovery found {len(cluster_nodes)} node files.")
+
+        for filename in cluster_nodes:
             filepath = os.path.join(node_dir, filename)
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
@@ -250,7 +264,8 @@ class ClusterWorker(QObject):
                     if nid:
                         self._known_nodes[nid] = data
                         self.node_updated.emit(data)
-            except: pass
+            except Exception as e:
+                print(f"Cluster: Discovery Error {filename} - {e}")
 
 
     def _allocate_pending_tasks(self):
@@ -263,9 +278,12 @@ class ClusterWorker(QObject):
         
         # 1. Gather Online Nodes (Candidates)
         workers = []
+        # print(f"DEBUG_ALLOC: checking {len(self._known_nodes)} known nodes...")
         for nid, data in self._known_nodes.items():
             # Must be Online
-            if "Offline" in data.get("status", ""): continue
+            if "Offline" in data.get("status", ""): 
+                 # print(f"DEBUG_ALLOC: Node {nid} is Offline. Skip.")
+                 continue
             
             # 2. Calculate Score (Tasks ASC, CPU ASC)
             score = (data.get("active_task_count", 0) * 100) + data.get("cpu_usage", 0)
@@ -274,6 +292,7 @@ class ClusterWorker(QObject):
         # [FIX] Guarantee Master is a candidate (Self-Injection)
         # Even if file system sync is slow, Master knows it exists.
         if self.node_id not in [w["id"] for w in workers]:
+            print(f"DEBUG_ALLOC: Self-injecting Master {self.node_id} as candidate.")
             # Construct self-data
             self_data = {
                 "node_id": self.node_id,
@@ -284,7 +303,9 @@ class ClusterWorker(QObject):
             score = (self.active_task_count * 100)
             workers.append({"id": self.node_id, "score": score, "data": self_data})
             
-        if not workers: return # No workers to assign to
+        if not workers: 
+            print("DEBUG_ALLOC: No eligible workers found.")
+            return # No workers to assign to
         
         # Sort by Score (Best First)
         workers.sort(key=lambda x: x["score"])

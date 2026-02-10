@@ -87,7 +87,11 @@ class WatchFolderEngine(QThread):
     def scan(self):
         watch_folders = self.settings.get("watch_folders", [])
         if not watch_folders:
+            if not getattr(self, '_notified_empty', False):
+                print("WatchFolderEngine: Zero folders configured. Nothing to monitor.")
+                self._notified_empty = True
             return
+        self._notified_empty = False
 
         for wf in watch_folders:
             if not self.is_running: return
@@ -158,8 +162,8 @@ class WatchFolderEngine(QThread):
             if not os.path.exists(file_path): return False
             
             size1 = os.path.getsize(file_path)
-            # Short wait to check for growth
-            time.sleep(1.0)
+            # [OPTIMIZED] Short wait to check for growth (0.5s for faster response)
+            time.sleep(0.5)
             if not self.is_running: return False
             size2 = os.path.getsize(file_path)
             
@@ -210,7 +214,7 @@ class WatchFolderEngine(QThread):
                         
                         item = {
                             "path": fpath,
-                            "base_name": base,
+                            "base_name": fname, # [FIX] Use full filename to match ClusterManager's convention (foo.ts vs foo)
                             "folder_name": folder_name,
                             "timestamp": os.path.getmtime(fpath)
                         }
