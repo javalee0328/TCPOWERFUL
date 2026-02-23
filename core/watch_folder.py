@@ -25,9 +25,10 @@ class WatchFolderEngine(QThread):
             
         self.processed_db_path = os.path.normpath(os.path.join(base, "watch_folder_history.json"))
         self.processed_files = self.load_history() # Now a dict {path: mtime}
+        self._last_seen_mtimes = {}  # mtime from last scan
+        self._seen_this_session = set()  # [v27.10.52] Files seen at least once this session
         self.is_running = False
         self._snapshot_requested = False # Flag for async request
-        self._last_seen_mtimes = {} # {file_path: mtime} from last scan cycle
 
     def request_snapshot(self):
         """Thread-safe request for a snapshot."""
@@ -169,25 +170,16 @@ class WatchFolderEngine(QThread):
                     is_new_appearance = file_path not in self._last_seen_mtimes
                     mtime_changed = (file_path in self._last_seen_mtimes and self._last_seen_mtimes[file_path] != current_mtime)
                     
-                    # [v27.10.1] CRITICAL FIX: Only generate tasks on NEW files
-                    # mtime_changed means file is being copied/modified - DON'T generate duplicate tasks!
+                    # [v27.10.52] TASK GENERATION GUARANTEE:
+                    # History is NEVER used to skip task creation.
+                    # Only _seen_this_session prevents re-emitting every 1-second poll.
+                    # This ensures every file in the watch folder ALWAYS generates a task.
                     if is_new_appearance:
-                        # [v27.9.3] Persistence Check: Ignore if already processed with same mtime
-                        last_processed_mtime = self.processed_files.get(file_path, 0)
-                        if last_processed_mtime == current_mtime:
-                            # [v27.10.50] RE-DETECTION GUARD:
-                            # On fresh restart, _last_seen_mtimes is empty.
-                            # A match in processed_files does NOT mean a live cluster task exists.
-                            # We skip ONLY if we have already seen this file in THIS session.
-                            # This prevents permanent skip of files like 11集.
-                            if len(self._last_seen_mtimes) > 0:
-                                # We've already scanned once this session - safe to skip.
-                                current_files_mtimes[file_path] = current_mtime 
-                                continue
-                            else:
-                                # First scan of session - DO NOT skip, re-emit to be safe.
-                                print(f"WatchFolderEngine: [RE-DETECT] First scan: re-emitting known file: {filename}")
-                                # Fall through to detection logic below
+                        if file_path in self._seen_this_session:
+                            # Already handled in this session - skip to avoid duplicate every poll
+                            current_files_mtimes[file_path] = current_mtime
+                            continue
+                        # else: fall through - always emit (history check removed)
 
                         print(f"WatchFolderEngine: [EVENT] NEW FILE Detected: {filename}")
                         if self.is_file_ready(file_path):
@@ -195,6 +187,8 @@ class WatchFolderEngine(QThread):
                             # Update persistent history
                             self.processed_files[file_path] = current_mtime
                             self.save_history()
+                            # [v27.10.52] Mark as seen this session so subsequent scans won't re-emit
+                            self._seen_this_session.add(file_path)
                             self.file_detected.emit(file_path, wf.get("name", "WatchFolder"))
                         else:
                             # If not ready, we DON'T add it to current_files_mtimes yet 

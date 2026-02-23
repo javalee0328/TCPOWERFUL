@@ -209,25 +209,19 @@ class WatchTaskCreationThread(QThread):
             full_name = os.path.basename(self.file_path)
             base_name = full_name 
 
-            # [v27.10.28] Strict Repeat Detection
+            # [v27.10.52] Duplicate Check: If this file path has been processed before,
+            # add HHMMSS timestamp to make the task unique (user requirement).
             history = self.parent_ui.watch_engine.processed_files
-            current_mtime = os.path.getmtime(self.file_path) if os.path.exists(self.file_path) else 0
+            norm_curr = os.path.normpath(self.file_path)
             
-            is_repeat = False
-            for p, m in history.items():
-                if os.path.basename(p) == full_name:
-                    norm_p = os.path.normpath(p).lower()
-                    norm_curr = os.path.normpath(self.file_path).lower()
-                    if norm_p != norm_curr or (norm_p == norm_curr and abs(m - current_mtime) > 1):
-                        is_repeat = True
-                        break
+            is_repeat = norm_curr in history
             
             if is_repeat:
-                # [v27.10.45] Use randomized suffix to prevent concurrency collisions when 3+ files added at once
-                import uuid
-                unique_suffix = uuid.uuid4().hex[:6].upper()
-                base_name = f"{f_base}_{unique_suffix}{f_ext}"
-                print(f"DEBUG_THREAD: Repeat detection. Adding UUID suffix: {base_name}")
+                # [v27.10.52] Add HHMMSS timestamp so user knows it's a re-process
+                import datetime
+                ts = datetime.datetime.now().strftime("%H%M%S")
+                base_name = f"{f_base}_{ts}{f_ext}"
+                print(f"DEBUG_THREAD: Repeat file (in history). Adding timestamp: {base_name}")
             else:
                 print(f"DEBUG_THREAD: Fresh file detected. Using original name: {base_name}")
             
@@ -705,18 +699,20 @@ class TaskProgressWidget(QWidget):
 
         # 8. Progress
         self.progress = QProgressBar()
-        # [v27.10.43] Force fixed width to match header labels exactly (no stretch)
-        self.progress.setFixedWidth(self.WIDTHS["prog"]) 
+        self.progress.setFixedWidth(self.WIDTHS["prog"])
+        self.progress.setMinimumWidth(self.WIDTHS["prog"])  # [v27.10.52] Double-lock width
+        self.progress.setMaximumWidth(self.WIDTHS["prog"])
         self.progress.setTextVisible(True)
+        # [v27.10.52] Unified QSS - margin-right:-1px fixes Qt Windows 100% fill gap
         self.progress.setStyleSheet("""
             QProgressBar {
-                background-color: #333; border: none; border-radius: 0px; height: 26px;
+                background-color: #333; border: none; border-radius: 0px;
+                height: 26px; max-height: 26px;
                 text-align: center; color: white; font-size: 11px; font-weight: bold;
-                padding: 0px; 
             }
-            QProgressBar::chunk { background-color: #2e7d32; border-radius: 0px; margin: 0px; }
+            QProgressBar::chunk { background-color: #2e7d32; border-radius: 0px; margin: 0px; margin-right: -1px; }
         """)
-        layout.addWidget(self.progress) # [v27.10.43] Removed stretch 1 to maintain alignment
+        layout.addWidget(self.progress)
 
         # 9. Finished Time
         self.lbl_fin_time = QLabel("-")
@@ -817,15 +813,14 @@ class TaskProgressWidget(QWidget):
         self.progress.setRange(0, 100) # Ensure range is fixed
         self.progress.setValue(100)    # Force 100%
         self.progress.setFormat("100%")
-        # [v27.10.51] Force Green style, no border-radius margin so bar fills full width
-        self.progress.setFixedWidth(self.WIDTHS["prog"])  # Ensure consistent width
+        # [v27.10.52] Done state - dark green background, same unified QSS
         self.progress.setStyleSheet("""
             QProgressBar {
-                background-color: #1a3a1a; border: 1px solid #2e7d32; border-radius: 0px; height: 26px;
+                background-color: #1a3a1a; border: none; border-radius: 0px;
+                height: 26px; max-height: 26px;
                 text-align: center; color: white; font-size: 11px; font-weight: bold;
-                padding: 0px;
             }
-            QProgressBar::chunk { background-color: #2e7d32; border-radius: 0px; margin: 0px; }
+            QProgressBar::chunk { background-color: #2e7d32; border-radius: 0px; margin: 0px; margin-right: -1px; }
         """)
         
         # [FIX] Use real file modification time if available
@@ -4186,7 +4181,7 @@ class ModernTranscoderUI(QMainWindow):
                                 except: last_seen = 0
                                 
                             time_since_seen = time.time() - last_seen
-                            if time_since_seen > 60:  # 60 seconds offline threshold
+                            if time_since_seen > 30:  # [v27.10.52] 30s reclaim (was 60s) for faster failover
                                 debug_log(f"Master reclaiming task from offline node {assigned}: {t.get('base_name')}")
                                 t["assigned_to"] = None
                                 t["claimed_by"] = None
@@ -5299,14 +5294,8 @@ class ModernTranscoderUI(QMainWindow):
                 widget.progress.setStyleSheet("QProgressBar { text-align: center; color: white; background-color: #222; border: none; border-radius: 0px; height: 26px; padding: 0px; }") 
             else:
                 widget.progress.setValue(percent)
-                widget.progress.setStyleSheet("""
-                    QProgressBar {
-                        background-color: #333; border: none; border-radius: 0px; height: 26px;
-                        text-align: center; color: white; font-size: 11px; font-weight: bold;
-                        padding: 0px; 
-                    }
-                    QProgressBar::chunk { background-color: #2e7d32; border-radius: 0px; margin: 0px; }
-                """)
+                # [v27.10.52] Do NOT override QSS here - widget already has unified style from __init__
+                # This prevents style flickering and ensures consistent bar width
             if text:
                 widget.progress.setFormat(text) # [MODIFIED] Set text on progress bar
             
