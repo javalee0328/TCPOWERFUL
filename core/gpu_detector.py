@@ -2,15 +2,26 @@ import subprocess
 import json
 import logging
 import os
+import sys
+
+def get_ffmpeg_path():
+    """Resolves absolute path to ffmpeg, especially in OneFile builds."""
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS
+        # Internal bundled path
+        bundle_p = os.path.join(base_path, "core", "ffmpeg.exe")
+        if os.path.exists(bundle_p): return bundle_p
+    return "ffmpeg"
 
 def is_encoder_functional(encoder_name):
     """
     Actually tries to initialize the encoder with a 1-frame dummy task.
     """
     try:
+        ffmpeg = get_ffmpeg_path()
         # Create a 1-second silence/black test
         cmd = [
-            "ffmpeg", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.1",
+            ffmpeg, "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.1",
             "-c:v", encoder_name, "-f", "null", "-"
         ]
         flags = 0x08000000 if os.name == 'nt' else 0 # CREATE_NO_WINDOW
@@ -24,10 +35,11 @@ def get_gpu_encoders():
     Detects available hardware encoders via FFmpeg and VERIFIES functionality.
     """
     encoders = {"nvenc": False, "qsv": False, "amf": False}
+    ffmpeg = get_ffmpeg_path()
     
     try:
         flags = 0x08000000 if os.name == 'nt' else 0
-        result = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, check=True, creationflags=flags)
+        result = subprocess.run([ffmpeg, "-encoders"], capture_output=True, text=True, check=True, creationflags=flags)
         output = result.stdout.lower()
         
         if "nvenc" in output and is_encoder_functional("h264_nvenc"):
@@ -38,7 +50,8 @@ def get_gpu_encoders():
             encoders["amf"] = True
             
     except Exception as e:
-        logging.error(f"Error detecting GPU encoders: {e}")
+        # logging.error(f"Error detecting GPU encoders: {e}")
+        pass # Suppress standard error to avoid console noise if ffmpeg not found initially
         
     return encoders
 

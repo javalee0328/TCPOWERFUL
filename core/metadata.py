@@ -8,26 +8,24 @@ def get_video_metadata(file_path):
     Returns a dict with: width, height, codec_name, duration, fps, bitrate
     """
     try:
-        cmd = [
-            "ffprobe", 
-            "-v", "quiet", 
-            "-print_format", "json", 
-            "-show_format", 
-            "-show_streams", 
-            "-select_streams", "v:0", # Changed below to select all
-            file_path
-        ]
+        # [FIX v27.10.7] Robust tool resolution & UNC handling
+        from core.transcoder import Transcoder
+        tx = Transcoder()
+        ffprobe_exe = tx.ffprobe_path
         
-        # Override cmd to select audio too
+        # [FIX v27.10.8] Conservative Pathing: use normpath
+        normalized_path = os.path.normpath(file_path)
+        
+        # Probe command
         cmd = [
-            "ffprobe", 
+            ffprobe_exe, 
             "-v", "quiet", 
             "-analyzeduration", "100000000", # 100M
             "-probesize", "100000000",      # 100M
             "-print_format", "json", 
             "-show_format", 
             "-show_streams", 
-            file_path
+            normalized_path
         ]
         
         flags = 0x08000000 if os.name == 'nt' else 0 # CREATE_NO_WINDOW

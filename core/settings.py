@@ -26,7 +26,7 @@ else:
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 
 # [VERSIONING]
-CURRENT_VERSION = "2026.2.10"
+CURRENT_VERSION = "v27.10.51"
 
 # [DEBUG]
 try:
@@ -50,7 +50,8 @@ class SettingsManager:
                 "watch_folders": [],
                 "playback_history": {},
                 "source_history": [],
-                "output_history": []
+                "output_history": [],
+                "cluster_role": "Worker" # [v27.10.20] Default to Worker for safety; leader election will upgrade to Master if possible
             }
             debug_log(f"Initializing SettingsManager. Path: {SETTINGS_FILE}")
             cls._instance.load()

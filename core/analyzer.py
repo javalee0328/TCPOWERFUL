@@ -43,6 +43,9 @@ class AudioLevelAnalyzer(QThread):
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             
+            # [v27.10.17] Fix Ghost Windows: Add CREATE_NO_WINDOW flag
+            flags = 0x08000000 if os.name == 'nt' else 0
+            
             self.process = subprocess.Popen(
                 cmd, 
                 stdout=subprocess.DEVNULL, 
@@ -51,6 +54,7 @@ class AudioLevelAnalyzer(QThread):
                 encoding='utf-8',
                 errors='replace',
                 startupinfo=startupinfo,
+                creationflags=flags,
                 bufsize=0 # Unbuffered to reduce latency
             )
             

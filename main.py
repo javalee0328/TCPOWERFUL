@@ -10,11 +10,33 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from PySide6.QtWidgets import QApplication
 from ui.main_window import ModernTranscoderUI
 import logging
+import time
+from datetime import datetime
+
+# [v27.9.13] File logging setup
+log_file = os.path.join(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))), 'debug.log')
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file, mode='w', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+def debug_log(msg):
+    """Global debug logging function"""
+    logging.info(msg)
+    print(msg)
 
 # Global Mutex Reference to prevent Garbage Collection
 _app_mutex = None
 
 if __name__ == "__main__":
+    # [v27.10.16] Fix Ghost Windows (Recursive Spawning)
+    import multiprocessing
+    multiprocessing.freeze_support()
+
     logging.basicConfig(level=logging.INFO)
     app = QApplication(sys.argv)
     
@@ -29,7 +51,6 @@ if __name__ == "__main__":
     # --- Single Instance Check (Triple-Lock: Mutex + LockFile + SharedMem) ---
     # [DISABLED] Single Instance Check - User requested to allow multiple instances
     # Keeping the code commented for reference
-    """
     import ctypes
     from PySide6.QtWidgets import QMessageBox
     from PySide6.QtCore import Qt, QLockFile, QDir, QSharedMemory
@@ -91,7 +112,7 @@ if __name__ == "__main__":
         msg = QMessageBox()
         msg.setWindowTitle("ProTranscoder 2026")
         msg.setText("程式已在運行中 (Already Running)")
-        msg.setInformativeText("請切換至已開啟的視窗。\\nPlease switch to the existing window.")
+        msg.setInformativeText("請切換至已開啟的視窗。\n\nPlease switch to the existing window.")
         msg.setStandardButtons(QMessageBox.Ok)
         msg.setIcon(QMessageBox.Warning)
         
@@ -103,30 +124,16 @@ if __name__ == "__main__":
         
         msg.exec()
         sys.exit(0)
-    """
     
     # Import required modules
     from PySide6.QtCore import QTimer
     
     import traceback
     
-    # Debug logging helper (Duplicated from main_window temporarily for startup safety)
-    def main_debug_log(msg):
-        try:
-            log_path = os.path.join(os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.getcwd(), "dist", "debug.log")
-            # Ensure dir exists if we are making it (though dist usually exists in dev, in frozen it's different)
-            # In frozen, dirname(sys.executable) is the folder.
-            if getattr(sys, 'frozen', False):
-                 log_path = os.path.join(os.path.dirname(sys.executable), "debug.log")
-            
-            with open(log_path, "a", encoding="utf-8") as f:
-                import time
-                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - [MAIN] {msg}\n")
-        except:
-            pass
+    # [v27.9.12] Logging is now handled by the global debug_log function at top of file
 
     try:
-        main_debug_log("Starting Application Init...")
+        debug_log("Starting Application Init...")
         app.setApplicationName("ProTranscoder 2026")
         
         # --- Two-Stage Hardware Protection Check ---
@@ -154,7 +161,7 @@ if __name__ == "__main__":
         
         if allowed:
             # Dongle already present
-            main_debug_log(f"License Verified: {status_msg}")
+            debug_log(f"License Verified: {status_msg}")
             startup_dlg.set_success(status_msg)
             QTimer.singleShot(800, startup_dlg.accept)
         
@@ -163,29 +170,29 @@ if __name__ == "__main__":
         
         if not startup_dlg.check_result:
             # User clicked Exit or dialog was rejected
-            main_debug_log("User cancelled startup")
+            debug_log("User cancelled startup")
             sys.exit(0)
         
-        main_debug_log(f"License Verified: Proceeding to main window")
+        debug_log(f"License Verified: Proceeding to main window")
         
-        main_debug_log("Initializing MainWindow...")
+        debug_log("Initializing MainWindow...")
         window = ModernTranscoderUI()
         
-        main_debug_log("Showing Window...")
+        debug_log("Showing Window...")
         window.show()
         
         # Debug: Check if mutex persists
         print(f"DEBUG: App Launched. Mutex: {_app_mutex}")
-        main_debug_log("Entering Main Loop...")
+        debug_log("Entering Main Loop...")
         
         exit_code = app.exec()
-        main_debug_log(f"Application Exiting with code: {exit_code}")
+        debug_log(f"Application Exiting with code: {exit_code}")
         sys.exit(exit_code)
         
     except Exception as e:
         err_msg = traceback.format_exc()
         print(f"CRITICAL ERROR: {err_msg}")
-        main_debug_log(f"CRITICAL STARTUP ERROR:\n{err_msg}")
+        debug_log(f"CRITICAL STARTUP ERROR:\n{err_msg}")
         
         # Try to show error box if QApplication is alive
         try:

@@ -6,7 +6,8 @@ import time
 from PySide6.QtCore import QObject, QTimer, Signal
 import psutil
 import random # [NEW] For backoff
-from core.settings import CURRENT_VERSION
+import hashlib
+from core.settings import CURRENT_VERSION, debug_log
 
 class ClusterWorker(QObject):
     """
@@ -16,6 +17,8 @@ class ClusterWorker(QObject):
     node_updated = Signal(dict)
     watch_config_synced = Signal(list) # [NEW] Signal for synced watch folders
     role_changed = Signal(str) # [NEW] Signal for role change
+    master_stale_detected = Signal() # [v27.10.20] Signal for failover
+    task_removed = Signal(str) # [FIX v27.9.15] Signal for task deletion
     finished = Signal()
 
     def __init__(self, cluster_path, node_id, settings_dict):
@@ -63,6 +66,22 @@ class ClusterWorker(QObject):
         self.current_activity = activity
         self.active_task_count = count
 
+    def _get_local_ip(self):
+        """[v27.10.24] Robust UDP probe to get correct LAN IP."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Doesn't even have to be reachable
+            s.connect(('8.8.8.8', 1))
+            IP = s.getsockname()[0]
+        except Exception:
+            try:
+                IP = socket.gethostbyname(socket.gethostname())
+            except:
+                IP = "127.0.0.1"
+        finally:
+            s.close()
+        return IP
+
     def update_settings(self, new_settings):
         """Allows main thread to update settings without restarting worker."""
         # Update our internal dict copy
@@ -84,15 +103,15 @@ class ClusterWorker(QObject):
             print(f"ClusterWorker: Init Error - {e}")
 
     def sync(self):
-        # 1. Heartbeat
-        self._update_my_heartbeat("Online")
-        
-        # 2. Discover Nodes
-        self._discover_nodes()
-        
         # 3. [NEW] Leader Election & Role Enforcement
         self._perform_leader_election()
         
+        # 1. Heartbeat
+        self._update_my_heartbeat("Online")
+        
+        # 2. [FIX v27.10.24] Restore Node Discovery
+        # Scans nodes/ folder for other participants
+        self._discover_nodes()
         # 4. Task Logic (Split by Role)
         my_role = self.settings.get("cluster_role", "Worker")
         
@@ -101,6 +120,9 @@ class ClusterWorker(QObject):
              self._allocate_pending_tasks()
              # [NEW] Master: Broadcast Watch Config
              self._sync_watch_config(role="Master")
+             
+             # [NEW v27.10.20] Master: Backup Global Settings for Failover
+             self._backup_master_settings()
         else:
              # [NEW] Worker: Read Watch Config
              self._sync_watch_config(role="Worker")
@@ -113,13 +135,10 @@ class ClusterWorker(QObject):
     def _perform_leader_election(self):
         """
         Attempts to acquire the 'master.lock' file.
-        - If available or stale: Become Master.
-        - If held by another valid node: Become Worker.
         """
         lock_file = os.path.join(self._cluster_path, "master.lock")
         now = time.time()
         
-        # 1. Read existing lock
         current_lock = {}
         lock_stale = False
         
@@ -128,68 +147,60 @@ class ClusterWorker(QObject):
                 with open(lock_file, 'r', encoding='utf-8') as f:
                     current_lock = json.load(f)
                 
-                # Check stale (30s timeout)
-                last_seen = current_lock.get("timestamp", 0)
-                if now - last_seen > 30:
+                last_seen_lock = current_lock.get("timestamp", 0)
+                if now - last_seen_lock > 30:
                     lock_stale = True
-                    # debug_log("Cluster: Master lock is stale.")
             except:
-                lock_stale = True # Corrupt file -> Stale
+                lock_stale = True
         
-        # 2. Decide Role
         my_role = "Worker"
         
-        # Condition A: I am already the owner -> Renew
+        if lock_stale:
+            # [v27.10.49] AUTO-FAILOVER: If lock is stale, take over!
+            # Using randomized jitter based on node ID to avoid multiple nodes fighting
+            # This ensures only one node wins the race condition on the lock file.
+            jitter = int(hashlib.md5(self.node_id.encode()).hexdigest(), 16) % 15 
+            time.sleep(jitter * 0.2) # 0-3s wait
+            
+            # Re-read lock after jitter to see if someone else claimed it
+            if os.path.exists(lock_file):
+                try:
+                    with open(lock_file, 'r', encoding='utf-8') as f:
+                        check_lock = json.load(f)
+                    check_ts = check_lock.get("timestamp", 0)
+                    if abs(now - check_ts) < 30: # Someone else took it and refreshed within 30s
+                        lock_stale = False
+                except: pass
+            
+            if lock_stale:
+                debug_log(f"Cluster: Stale Master Lock detected. Performing Autonomous Failover: {self.node_id}")
+                self._write_master_lock(lock_file, now)
+                my_role = "Master"
+                self.master_stale_detected.emit() # Signal for UI update if needed
+        
         if current_lock.get("node_id") == self.node_id:
             my_role = "Master"
             self._write_master_lock(lock_file, now)
+        elif not os.path.exists(lock_file):
+             self._write_master_lock(lock_file, now)
+             my_role = "Master"
+        else:
+             # Lock exists, not stale, not ours -> We are a Worker
+             my_role = "Worker"
             
-        # Condition B: No lock OR Stale lock -> Claim it
-        elif not os.path.exists(lock_file) or lock_stale:
-            # Try to claim (first come first served)
-            # Random backoff to reduce collision on simultaneous start
-            time.sleep(random.uniform(0.1, 0.5))
-            
-            self._write_master_lock(lock_file, now)
-            # Re-read to confirm we won the race
-            try:
-                with open(lock_file, 'r', encoding='utf-8') as f:
-                    check = json.load(f)
-                if check.get("node_id") == self.node_id:
-                    my_role = "Master"
-            except:
-                pass # Failed to verification, fallback to Worker
-            
-        # [FIX] Global Split-Brain Resolution (Always Run)
-        # Even if we hold the lock, we must check if someone else is also acting as Master (e.g. forced by User or clock skew)
         if my_role == "Master":
+             # Tie-break: Higher ID wins if two nodes claim simultaneously
+             # (though file system lock usually prevents this)
              for other_id, data in self._known_nodes.items():
                  if other_id == self.node_id: continue
                  if data.get("role") == "Master" and data.get("status") == "Online":
-                     # CONFLICT DETECTED: Two Masters!
-                     print(f"Cluster: Split-Brain Detected! Me({self.node_id}) vs Other({other_id})")
-                     
-                     # Tie-Breaker: Lower Node ID Yields (Backs off)
                      if self.node_id < other_id:
-                         print("Cluster: I am yielding Master role (Tie-Breaker).")
-                         my_role = "Worker" # Downgrade immediately
+                         my_role = "Worker"
                          break
-                     else:
-                         print("Cluster: I am keeping Master role (Tie-Breaker).")
             
-            # 3. Apply Role
-                
-        # 3. Apply Role
-        # Update settings dict in memory (not disk, to avoid settings thrashing) only if changed
         current_stored = self.settings.get("cluster_role", "Worker")
-        
         if current_stored != my_role or self._first_sync:
-            print(f"Cluster: Role Synced to {my_role} (Changed or First Run)")
-            self.settings["cluster_role"] = my_role # Update local thread copy
-            
-            # Persist to real settings via Main Thread Signal? 
-            # Actually, better to just emit a signal and let Main Window handle the state change.
-            # But for heartbeat, we need to know NOW.
+            self.settings["cluster_role"] = my_role
             self.role_changed.emit(my_role)
             self._first_sync = False
 
@@ -203,13 +214,13 @@ class ClusterWorker(QObject):
             with open(lock_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f)
                 f.flush()
-                os.fsync(f.fileno()) # [FIX] Force write to disk/network
+                try: os.fsync(f.fileno())
+                except: pass
         except Exception as e:
              print(f"Cluster: Failed to write lock: {e}")
 
     def _update_my_heartbeat(self, status):
         node_file = os.path.join(self._cluster_path, "nodes", f"{self.node_id}.json")
-        
         cpu = 0
         ram = 0
         try:
@@ -219,8 +230,8 @@ class ClusterWorker(QObject):
 
         hb_data = {
             "node_id": self.node_id,
-            "ip": socket.gethostbyname(socket.gethostname()),
-            "last_seen": datetime.datetime.now().isoformat(),
+            "ip": self._get_local_ip(),
+            "last_seen": time.time(),
             "status": status,
             "role": self.settings.get("cluster_role", "Master"),
             "version": CURRENT_VERSION,
@@ -228,199 +239,195 @@ class ClusterWorker(QObject):
             "ram_usage": ram,
             "total_ram": self.total_ram_gb,
             "current_activity": self.current_activity,
-            "active_task_count": self.active_task_count, # [NEW] Crucial for Load Balancing
-            "alias": self.settings.get("worker_alias") or (f"{self.settings.get('cluster_role', 'Worker')}-{str(self.node_id)[-2:]}" if self.settings.get('cluster_role') != 'Master' else "Master")
+            "active_task_count": self.active_task_count,
+            "alias": self.settings.get("worker_alias") or self.node_id
         }
         try:
-            # Atomic Write (Temp file -> Rename) could be better, but 'w' is okay for now
-            # On network shares, sometimes direct write is safer than rename due to perms
-            # Atomic Write (Temp file -> Rename) could be better, but 'w' is okay for now
-            # On network shares, sometimes direct write is safer than rename due to perms
             with open(node_file, "w", encoding="utf-8") as f:
                 json.dump(hb_data, f, indent=2)
-            # print(f"Cluster: Heartbeat updated for {self.node_id}") 
+                f.flush()
+                try: os.fsync(f.fileno())
+                except: pass 
+            self._known_nodes[self.node_id] = hb_data
         except Exception as e:
-            print(f"Cluster: Heartbeat Error - {e}")
+            print(f"Cluster: Heartbeat Write Error - {e}")
 
     def _discover_nodes(self):
         node_dir = os.path.join(self._cluster_path, "nodes")
-        if not os.path.exists(node_dir):
-             print(f"Cluster: Node dir missing: {node_dir}")
-             return
-        
-        # Read all Valid JSONs
-        cluster_nodes = [f for f in os.listdir(node_dir) if f.endswith(".json")]
-        # print(f"Cluster: Discovery found {len(cluster_nodes)} node files.")
+        if not os.path.exists(node_dir): return
+        try:
+            cluster_nodes = [f for f in os.listdir(node_dir) if f.endswith(".json")]
+            for filename in cluster_nodes:
+                filepath = os.path.join(node_dir, filename)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        data["_filepath"] = filepath
+                        data["_filename"] = filename
+                        nid = data.get("node_id")
+                        if nid:
+                            ls = data.get("last_seen")
+                            # [v27.10.41] Robust type handling for last_seen
+                            if ls:
+                                try:
+                                    ts = ls if isinstance(ls, (int, float)) else datetime.datetime.fromisoformat(ls).timestamp()
+                                    # [v27.10.49] Use abs() for diff to tolerate clock skew/future timestamps
+                                    diff = abs(time.time() - ts)
+                                    IS_ONE_YEAR = abs(diff - 31536000) < 3600
+                                    if diff < 60 or IS_ONE_YEAR: data["status"] = "Online"
+                                    else: data["status"] = "Offline (Timeout)"
+                                    data["last_seen"] = ts
+                                except: pass
+                            
+                            self._known_nodes[nid] = data
+                            self.node_updated.emit(data)
+                except Exception as e:
+                    print(f"Cluster: Discovery Error {filename} - {e}")
+        except: pass
 
-        for filename in cluster_nodes:
-            filepath = os.path.join(node_dir, filename)
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    data["_filepath"] = filepath
-                    data["_filename"] = filename
-                    
-                    nid = data.get("node_id")
-                    if nid:
-                        self._known_nodes[nid] = data
-                        self.node_updated.emit(data)
-            except Exception as e:
-                print(f"Cluster: Discovery Error {filename} - {e}")
 
+    def data_cpu_usage(self):
+        try: return psutil.cpu_percent()
+        except: return 0
 
     def _allocate_pending_tasks(self):
-        """
-        MASTER ONLY: Scans for 'Pending' tasks (unassigned) and assigns them 
-        to the best available node (lowest Active Task Count, then lowest CPU).
-        """
         task_dir = os.path.join(self._cluster_path, "tasks")
         if not os.path.exists(task_dir): return
         
-        # 1. Gather Online Nodes (Candidates)
         workers = []
-        # print(f"DEBUG_ALLOC: checking {len(self._known_nodes)} known nodes...")
+        now = datetime.datetime.now()
+        if not hasattr(self, '_transient_assignment_cache'):
+             self._transient_assignment_cache = {}
+             
+        self._transient_assignment_cache = {k:v for k,v in self._transient_assignment_cache.items() 
+                                          if (now - v['time']).total_seconds() < 10}
+
         for nid, data in self._known_nodes.items():
-            # Must be Online
-            if "Offline" in data.get("status", ""): 
-                 # print(f"DEBUG_ALLOC: Node {nid} is Offline. Skip.")
-                 continue
+            pending_count = self._transient_assignment_cache.get(nid, {}).get('count', 0)
+            real_tasks = data.get("active_task_count", 0)
+            effective_tasks = real_tasks + pending_count
+            score = (effective_tasks * 100) + data.get("cpu_usage", 0)
+            is_remote_worker = (nid != self.node_id)
             
-            # 2. Calculate Score (Tasks ASC, CPU ASC)
-            score = (data.get("active_task_count", 0) * 100) + data.get("cpu_usage", 0)
-            workers.append({"id": nid, "score": score, "data": data})
+            # Robust Clock-Skew Tolerance
+            # [v27.10.40] Robust timing with Clock Skew tolerance
+            is_recent = False
+            ls = data.get("last_seen")
+            if ls:
+                try:
+                    ts = ls if isinstance(ls, (int, float)) else datetime.datetime.fromisoformat(ls).timestamp()
+                    diff = time.time() - ts
+                    IS_ONE_YEAR = abs(abs(diff) - 31536000) < 3600
+                    # Standard 600s check, but using abs() to handle future timestamps (clock skew)
+                    if abs(diff) < 60 or IS_ONE_YEAR: is_recent = True
+                except: pass
+
+            status = data.get("status", "Unknown")
+            # If status is Online, we trust it or use is_recent for auto-recovery
+            is_online = (status == "Online" or status == "Online (Local)" or is_recent)
+            if not is_online: continue
+
+            workers.append({
+                "id": nid, "score": score, "data": data, "tasks": effective_tasks,
+                "is_remote": is_remote_worker, "is_active": True
+            })
             
-        # [FIX] Guarantee Master is a candidate (Self-Injection)
-        # Even if file system sync is slow, Master knows it exists.
-        if self.node_id not in [w["id"] for w in workers]:
-            print(f"DEBUG_ALLOC: Self-injecting Master {self.node_id} as candidate.")
-            # Construct self-data
-            self_data = {
-                "node_id": self.node_id,
-                "status": "Online",
-                "active_task_count": self.active_task_count,
-                "cpu_usage": 0 # Assume low priority if not polled yet
-            }
-            score = (self.active_task_count * 100)
-            workers.append({"id": self.node_id, "score": score, "data": self_data})
-            
-        if not workers: 
-            print("DEBUG_ALLOC: No eligible workers found.")
-            return # No workers to assign to
+        master_entry = next((w for w in workers if w["id"] == self.node_id), None)
+        if master_entry:
+            pending_count = self._transient_assignment_cache.get(self.node_id, {}).get('count', 0)
+            eff_tasks = self.active_task_count + pending_count
+            master_entry["data"]["active_task_count"] = self.active_task_count
+            master_entry["tasks"] = eff_tasks
+            # [v27.10.50] ZERO MASTER PENALTY: No base penalty (+0).
+            master_entry["score"] = (eff_tasks * 100) + self.data_cpu_usage()
+        else:
+            pending_count = self._transient_assignment_cache.get(self.node_id, {}).get('count', 0)
+            eff_tasks = self.active_task_count + pending_count
+            has_remote = any(w["is_remote"] for w in workers)
+            score = 999999 if has_remote else (eff_tasks * 100) + self.data_cpu_usage()
+            workers.append({
+                "id": self.node_id, "score": score,
+                "data": { "node_id": self.node_id, "status": "Online", "active_task_count": self.active_task_count, "cpu_usage": self.data_cpu_usage() },
+                "tasks": eff_tasks, "is_remote": False, "is_active": True
+            })
+             
+        if not workers: return
         
-        # Sort by Score (Best First)
         workers.sort(key=lambda x: x["score"])
-        
-        # 3. Scan Tasks
         try:
             for filename in os.listdir(task_dir):
                 if not filename.endswith(".json"): continue
-                
                 filepath = os.path.join(task_dir, filename)
                 try:
-                    # Check if modified recently? Or just read.
-                    # Optimization: Use _known_tasks cache to check if we processed this strict state?
-                    # No, we need fresh "assigned_to" status.
-                    
                     with open(filepath, "r", encoding="utf-8") as f:
                         task_data = json.load(f)
-                        
-                    # Target: Status=Pending AND No Assigned Node
                     status = task_data.get("cluster_status", "Pending")
                     assigned_to = task_data.get("assigned_to")
-                    
                     if status == "Pending" and not assigned_to:
-                        # FOUND UNASSIGNED TASK -> ASSIGN TO BEST WORKER
                         best_worker = workers[0]
                         assigned_nid = best_worker["id"]
-                        
-                        # Atomic Update
                         task_data["assigned_to"] = assigned_nid
                         task_data["cluster_status"] = "Assigned"
                         task_data["assignment_time"] = datetime.datetime.now().isoformat()
-                        
                         with open(filepath, "w", encoding="utf-8") as f:
                             json.dump(task_data, f, indent=2, ensure_ascii=False)
-                            
-                        print(f"Cluster[Master]: Assigned {task_data.get('base_name')} -> {assigned_nid} (Score: {best_worker['score']})")
-                        
-                        # Update Local Mock State for next iteration in this same loop?
-                        # Yes, heavily penalize this worker so we round-robin
+                        best_worker["tasks"] += 1
                         best_worker["score"] += 100 
-                        best_worker["data"]["active_task_count"] += 1
-                        workers.sort(key=lambda x: x["score"]) # Re-sort
-                        
-                except Exception as e:
-                    # print(f"Cluster: Alloc loop error {filename}: {e}")
-                    pass
+                        now_ts = datetime.datetime.now()
+                        cache_entry = self._transient_assignment_cache.get(assigned_nid, {'count': 0})
+                        self._transient_assignment_cache[assigned_nid] = { 'count': cache_entry['count'] + 1, 'time': now_ts }
+                        workers.sort(key=lambda x: x["score"])
+                except Exception as e: pass
         except: pass
 
     def _sync_tasks(self):
-        """
-        Reads tasks.
-        - Worker: Only emits if assigned_to == ME.
-        - Master: Emits ALL updates (to update Dashboard).
-        """
         task_dir = os.path.join(self._cluster_path, "tasks")
         if not os.path.exists(task_dir): return
-        
-        my_role = self.settings.get("cluster_role", "Worker")
-        
-        for filename in os.listdir(task_dir):
-            if filename.endswith(".json"):
-                filepath = os.path.join(task_dir, filename)
-                try:
-                    mtime = os.path.getmtime(filepath)
-                    if filename not in self._known_tasks or mtime > self._known_tasks[filename]:
-                        self._known_tasks[filename] = mtime
-                        
-                        # Read Task
-                        task_data = None
-                        for _ in range(3): # Retry for network stability
-                                try:
-                                    with open(filepath, "r", encoding="utf-8") as f:
-                                        task_data = json.load(f)
-                                    break
-                                except: time.sleep(0.1)
-                                
-                        if not task_data: continue
-                        
-                        task_data["cluster_filename"] = filename
-                        assigned_to = task_data.get("assigned_to")
-                        
-                        # Worker logic: Only emit if assigned to ME or if I sent it (Master sees all)
-                        if my_role == "Master" or assigned_to == self.node_id or task_data.get("node_origin") == self.node_id:
-                             self.task_synced.emit(task_data)
-                except Exception as e:
-                    # print(f"Cluster: Sync Task Error {filename}: {e}")
-                    pass
+        scanned_files = set()
+        try:
+            for filename in os.listdir(task_dir):
+                if filename.endswith(".json"):
+                    scanned_files.add(filename)
+                    filepath = os.path.join(task_dir, filename)
+                    try:
+                        mtime = os.path.getmtime(filepath)
+                        if filename not in self._known_tasks or mtime > self._known_tasks[filename]:
+                            self._known_tasks[filename] = mtime
+                            task_data = None
+                            for _ in range(3):
+                                    try:
+                                        with open(filepath, "r", encoding="utf-8") as f:
+                                            task_data = json.load(f)
+                                        break
+                                    except: time.sleep(0.1)
+                            if not task_data: continue
+                            task_data["cluster_filename"] = filename
+                            self.task_synced.emit(task_data)
+                    except: pass
+            missing_files = [f for f in self._known_tasks.keys() if f not in scanned_files]
+            for missing in missing_files:
+                del self._known_tasks[missing]
+                self.task_removed.emit(missing)
+        except Exception as e:
+            print(f"Cluster: Sync Loop Error: {e}")
 
     def _sync_watch_config(self, role):
-        """Syncs watch folder configuration via watch_config.json."""
         config_file = os.path.join(self._cluster_path, "watch_config.json")
-        
         if role == "Master":
-            # Master: Write current local config to shared area
             try:
                 watch_list = self.settings.get("watch_folders", [])
-                
-                # Check if file exists and has different content to avoid redundant writes
                 write_needed = True
                 if os.path.exists(config_file):
                     try:
                         with open(config_file, 'r', encoding='utf-8') as f:
                             existing = json.load(f)
-                        if existing == watch_list:
-                             write_needed = False
+                        if existing == watch_list: write_needed = False
                     except: pass
-                
                 if write_needed:
                     with open(config_file, 'w', encoding='utf-8') as f:
                         json.dump(watch_list, f, indent=2, ensure_ascii=False)
-            except Exception as e:
-                print(f"Cluster: Master Sync Watch Config Error - {e}")
-                
-        else: # Worker
-            # Worker: Read from shared area and update if changed
+            except: pass
+        else:
             if os.path.exists(config_file):
                 try:
                     mtime = os.path.getmtime(config_file)
@@ -428,11 +435,23 @@ class ClusterWorker(QObject):
                         self._last_watch_config_mtime = mtime
                         with open(config_file, 'r', encoding='utf-8') as f:
                             remote_config = json.load(f)
-                        
-                        # Emit signal for Main Window to update its UI
                         self.watch_config_synced.emit(remote_config)
-                except Exception as e:
-                    print(f"Cluster: Worker Sync Watch Config Error - {e}")
+                except: pass
+
+    def _backup_master_settings(self):
+        backup_file = os.path.join(self._cluster_path, "master_config_backup.json")
+        try:
+             keys = ["watch_folders", "max_parallel_tasks", "worker_output_path", "history_retention"]
+             backup_data = {k: self.settings.get(k) for k in keys if k in self.settings}
+             backup_data["backup_time"] = time.time()
+             backup_data["master_node_id"] = self.node_id
+             with open(backup_file, 'w', encoding='utf-8') as f:
+                 json.dump(backup_data, f, indent=2, ensure_ascii=False)
+        except: pass
+
+    def promote_to_master(self):
+        lock_file = os.path.join(self._cluster_path, "master.lock")
+        self._write_master_lock(lock_file, time.time())
 
 
 class ClusterManager(QObject):
@@ -440,276 +459,240 @@ class ClusterManager(QObject):
     Main thread interface for the ClusterWorker.
     """
     task_synced = Signal(dict)
+    task_removed = Signal(str)
     node_updated = Signal(dict)
-    watch_config_synced = Signal(list) # [NEW] Signal for synced watch folders
+    watch_config_synced = Signal(list)
     role_changed = Signal(str)
+    master_stale_detected = Signal()
 
     def __init__(self, settings_manager, parent=None):
         super().__init__(parent)
         self.settings = settings_manager
-        self.node_id = f"{socket.gethostname()}"
-        
-        # Path setup
-        default_cluster_path = os.path.join(os.getcwd(), "CLUSTER_SYNC")
-        self._cluster_path = self.settings.get("cluster_path", default_cluster_path)
-        
-        # [FIX] Ensure Robustness
+        import uuid
+        mac = str(uuid.getnode())[-6:]
+        self.node_id = f"{socket.gethostname()}-{mac}"
+        from core.settings import BASE_DIR
+        default_cluster_path = os.path.join(BASE_DIR, "CLUSTER_SYNC")
+        raw_path = self.settings.get("cluster_path", default_cluster_path)
+        if not os.path.isabs(raw_path):
+            self._cluster_path = os.path.abspath(os.path.join(BASE_DIR, raw_path))
+        else:
+            self._cluster_path = os.path.normpath(raw_path)
         try:
             if not os.path.exists(self._cluster_path):
                 os.makedirs(self._cluster_path, exist_ok=True)
-            # Test Write
-            test_file = os.path.join(self._cluster_path, "test_write")
-            with open(test_file, 'w') as f: f.write("ok")
-            os.remove(test_file)
-        except Exception as e:
-            print(f"Cluster: Failed to write to {self._cluster_path}. Fallback to TMP.")
+        except:
             import tempfile
             self._cluster_path = os.path.join(tempfile.gettempdir(), "ProTranscoder_Cluster")
             if not os.path.exists(self._cluster_path):
                 os.makedirs(self._cluster_path, exist_ok=True)
-
         
+        debug_log(f"[CLUSTER] Confirmed Sync Path: {self._cluster_path}")
+
         self.worker = None
         self.thread = None
-        self._known_nodes_cache = {} # Local copy for immediate access
+        self._known_nodes_cache = {} 
+        self._transient_assignment_cache = {} # [v27.10.50] Track recent assignments to handle bursts
+
+    @property
+    def master_id(self):
+        for nid, data in self._known_nodes_cache.items():
+            if data.get("role") == "Master" and data.get("status") == "Online": return nid
+        return None
 
     def start(self):
-        if self.thread and self.thread.isRunning():
-            return
-
+        if self.thread and self.thread.isRunning(): return
         from PySide6.QtCore import QThread
         self.thread = QThread()
-        
-        # Pass raw dict of settings needed
         settings_snapshot = {
             "cluster_sync_tasks": self.settings.get("cluster_sync_tasks", True),
             "cluster_role": self.settings.get("cluster_role", "Master"),
-            "watch_folders": self.settings.get("watch_folders", []) # [FIX] Include watch_folders for Master Sync
+            "watch_folders": self.settings.get("watch_folders", []),
+            "worker_alias": self.settings.get("worker_alias")
         }
-        
         self.worker = ClusterWorker(self._cluster_path, self.node_id, settings_snapshot)
         self.worker.moveToThread(self.thread)
-        
-        # Connect Signals
         self.thread.started.connect(self.worker.run_loop)
         self.worker.task_synced.connect(self.task_synced)
-        self.worker.node_updated.connect(self._on_node_updated) # Cache locally
-        self.worker.watch_config_synced.connect(self.watch_config_synced) # [NEW]
-        self.worker.role_changed.connect(self.role_changed) # [NEW] Re-emit
+        self.worker.node_updated.connect(self._on_node_updated)
+        self.worker.watch_config_synced.connect(self.watch_config_synced)
+        self.worker.role_changed.connect(self.role_changed)
+        self.worker.master_stale_detected.connect(self.master_stale_detected)
         self.worker.finished.connect(self.thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
-        
         self.thread.start()
-        print(f"ClusterManager: Background Thread Started. NodeID: {self.node_id}")
+
+    def delete_task(self, cluster_filename):
+        try:
+            task_path = os.path.join(self._cluster_path, "tasks", cluster_filename)
+            if os.path.exists(task_path): os.remove(task_path)
+            if self.worker and hasattr(self.worker, '_known_tasks') and cluster_filename in self.worker._known_tasks:
+                 del self.worker._known_tasks[cluster_filename]
+        except: pass
 
     def stop(self):
-        if self.worker:
-            self.worker.stop()
-        print("ClusterManager: Stopping...")
+        if self.worker: self.worker.stop()
 
     def update_worker_settings(self, new_settings):
-        """Passes new settings to the active background worker."""
-        if self.worker:
-            self.worker.update_settings(new_settings)
+        if self.worker: self.worker.update_settings(new_settings)
 
     def restart(self, new_path=None):
-        """Stops current worker and restarts with new settings."""
-        print("ClusterManager: Restarting...")
         self.stop()
-        
-        # Wait for thread to cleanup (simple blocking wait)
         if self.thread:
             self.thread.quit()
             self.thread.wait(2000) 
             self.thread = None
             self.worker = None
-            
-        # Update internal path if provided
-        if new_path:
-            self._cluster_path = new_path
-            
-        # Clear cache
+        if new_path: self._cluster_path = new_path
         self._known_nodes_cache = {}
-        
-        # Start fresh
         self.start()
 
+    def promote_to_master(self):
+        if self.worker: self.worker.promote_to_master()
+
+    def load_master_backup_settings(self):
+        backup_file = os.path.join(self._cluster_path, "master_config_backup.json")
+        if os.path.exists(backup_file):
+            try:
+                with open(backup_file, 'r', encoding='utf-8') as f: data = json.load(f)
+                for k in ["watch_folders", "max_parallel_tasks", "worker_output_path", "history_retention"]:
+                    if k in data: self.settings.set(k, data[k])
+                return True
+            except: pass
+        return False
+
     def _on_node_updated(self, data):
-        """Update local cache and re-emit."""
         nid = data.get("node_id")
         if nid:
-            # Re-implement timeout check logic:
-            last_seen_str = data.get("last_seen")
-            if last_seen_str:
+            last_seen = data.get("last_seen")
+            if last_seen:
                 try:
-                    last = datetime.datetime.fromisoformat(last_seen_str)
-                    secs = (datetime.datetime.now() - last).total_seconds()
-                    if secs > 30 and data.get("status") == "Online":
+                    ts = last_seen if isinstance(last_seen, (int, float)) else datetime.datetime.fromisoformat(last_seen).timestamp()
+                    secs = time.time() - ts
+                    is_online = (data.get("status") in ["Online", "Online (Local)"])
+                    IS_ONE_YEAR = abs(abs(secs) - 31536000) < 3600
+                    # [v27.10.43] Reduced timeout from 600s to 60s for faster detection
+                    if abs(secs) > 60 and not IS_ONE_YEAR and is_online:
                         data["status"] = "Offline (Timeout)"
+                    elif abs(secs) <= 60 or IS_ONE_YEAR:
+                         if data.get("status") not in ["Online", "Online (Local)"]: data["status"] = "Online"
                 except: pass
-            
             self._known_nodes_cache[nid] = data
-            
         self.node_updated.emit(data)
 
     def get_all_nodes(self):
+        if self.node_id not in self._known_nodes_cache:
+            self._known_nodes_cache[self.node_id] = {
+                "node_id": self.node_id, "alias": self.settings.get("worker_alias") or self.node_id,
+                "role": self.settings.get("cluster_role", "Master"), "status": "Online (Local)",
+                "ip": "127.0.0.1", "last_seen": time.time()
+            }
         return self._known_nodes_cache
 
     def set_local_activity(self, activity_str, active_count=0):
-        if self.worker:
-            self.worker.set_activity(activity_str, active_count)
+        if self.worker: self.worker.set_activity(activity_str, active_count)
 
-    # [DIRECT IO METHODS]
-    # These are occasional and quick enough to keep on main thread, 
-    # OR we can move them too if they prove slow. For now, writing small JSONs is usually fast.
-    # Reading/Listing dirs (in sync) was the main blocker.
-    
     def broadcast_task(self, task):
-        """Post a local task to the cluster."""
-        # Main thread write is okay for singular events
         try:
             import hashlib
             source_path = task.get("source") or task.get("source_path") or task.get("base_name")
             if not source_path: return None
             
-            # [FIX] Path-Agnostic Deduplication (Handle Mapped Drives D: vs Z:)
-            # Use BaseName + Size to identify "Same File" across different mount points
-            base_name = task.get('base_name', 'Task')
-            size = task.get('size', 0)
-            
-            # Robustness: If size is 0 (unlikely for ready file), fallback to path basename
-            hash_seed = f"{base_name}_{size}"
-            
-            # [FIX] Deterministic Hash
+            base_name, size, mtime = task.get('base_name', 'Task'), task.get('size', 0), task.get('mtime', 0)
+            hash_seed = f"{base_name}_{size}_{mtime}"
             path_hash = hashlib.md5(hash_seed.encode('utf-8')).hexdigest()[:12]
-            
-            # keeping base_name in filename for readability
             sanitized_name = "".join([c if c.isalnum() or c in ".-_" else "_" for c in base_name])
             filename = f"{sanitized_name}_{path_hash}.json"
             
-            # Ensure dir exists (Worker might not have created it yet if called immediately)
             tasks_dir = os.path.join(self._cluster_path, "tasks")
-            if not os.path.exists(tasks_dir): os.makedirs(tasks_dir)
-            
+            if not os.path.exists(tasks_dir): os.makedirs(tasks_dir, exist_ok=True)
             task_file = os.path.join(tasks_dir, filename)
             
-            # [FIX] Simplified Broadcast Logic
-            # Trust the Hash ID. If file exists, we assume it's the correct task.
+            cluster_task = task.copy()
             if os.path.exists(task_file):
                  try:
-                     with open(task_file, 'r', encoding='utf-8') as f:
-                         existing = json.load(f)
-                     
-                     # [FIX] Merge instead of Overwrite (Prevent Metadata Loss)
-                     # Only update fields provided in the new task
-                     # But preserve "claimed_by" and "status" if they are advanced?
-                     
-                     # If existing is Running/Done, we generally don't want to reset it 
-                     # UNLESS this is a forced re-broadcast from Master?
-                     if existing.get("cluster_status") not in ["Pending", "Failed"]:
-                         # If it's running, don't mess with it unless we are trying to stop it?
-                         return filename
-
-                     # Merge
+                     with open(task_file, 'r', encoding='utf-8') as f: existing = json.load(f)
                      existing.update(task)
-                     # Ensure essential fields
-                     existing["cluster_status"] = "Pending" 
-                     existing["broadcast_time"] = datetime.datetime.now().isoformat()
-                     
                      cluster_task = existing
-                 except: 
-                     # Corrupt file? Overwrite
-                     cluster_task = task.copy()
-                     cluster_task["cluster_status"] = "Pending"
-            else:
-                 cluster_task = task.copy()
-                 cluster_task["node_origin"] = self.node_id 
-                 cluster_task["cluster_status"] = "Pending"
+                 except: pass
             
-            cluster_task["node_origin"] = self.node_id # Ensure origin is accurate
+            cluster_task["node_origin"] = self.node_id
             cluster_task["broadcast_time"] = datetime.datetime.now().isoformat()
             if "widget" in cluster_task: del cluster_task["widget"]
             
-            # [FIX] Immediate Assignment (User request: "Task generation -> Assign WORKER")
-            # Don't wait for Load Balancer cycle. Assign immediately if possible.
-            if not cluster_task.get("assigned_to") and not cluster_task.get("claimed_by"):
-                # Find active workers
+            # Predictive Assignment (Master Only)
+            if self.settings.get("cluster_role") == "Master" and not cluster_task.get("assigned_to"):
                 try:
                     candidates = []
-                    now = datetime.datetime.now()
+                    now = time.time()
                     for nid, n_data in self._known_nodes_cache.items():
-                        # Basic liveness check (30s)
-                        last_seen = datetime.datetime.fromisoformat(n_data.get("last_seen", now.isoformat()))
-                        if (now - last_seen).total_seconds() < 30:
-                            role = n_data.get("role", "Master")
-                            # Prefer Workers, but include Master if no workers available
-                            if role == "Worker":
-                                candidates.insert(0, nid)  # Workers at front
-                            elif role == "Master":
-                                candidates.append(nid)  # Master as fallback
-                    
+                        ts = n_data.get("last_seen", 0)
+                        diff = now - (ts if isinstance(ts, (int, float)) else datetime.datetime.fromisoformat(ts).timestamp())
+                        if diff < 60 or abs(abs(diff)-31536000) < 3600:
+                            # [v27.10.50] Atomic Scoring: Heartbeat Count + Transient Count (Unconfirmed assignments)
+                            transient_count = self._transient_assignment_cache.get(nid, {"count": 0, "time": 0})
+                            if now - transient_count["time"] > 10: # 10s transient expiry
+                                actual_transient = 0
+                            else:
+                                actual_transient = transient_count["count"]
+                                
+                            score = ((n_data.get("active_task_count", 0) + actual_transient) * 100) + n_data.get("cpu_usage", 0)
+                            # [v27.10.50] ZERO MASTER PENALTY: Treat Master as equal
+                            candidates.append({"id": nid, "score": score})
                     if candidates:
-                        # Simple Random Distribution for statelessness
-                        import random
-                        chosen = random.choice(candidates)
-                        cluster_task["assigned_to"] = chosen
-                        print(f"ClusterManager: Immediately assigned task to {chosen}")
-                except Exception as e:
-                    print(f"ClusterManager: Assignment Error - {e}")
+                        candidates.sort(key=lambda x: x["score"])
+                        best_node = candidates[0]["id"]
+                        cluster_task["assigned_to"] = best_node
+                        task["assigned_to"] = best_node
+                        
+                        # Update Transient Cache immediately
+                        curr = self._transient_assignment_cache.get(best_node, {"count": 0, "time": 0})
+                        if now - curr["time"] > 10: curr = {"count": 1, "time": now}
+                        else: curr["count"] += 1; curr["time"] = now
+                        self._transient_assignment_cache[best_node] = curr
+                        debug_log(f"Cluster: Atomic assignment -> {best_node}")
+                    else:
+                        # [v27.10.50] FALLBACK: If node cache is empty (startup), assign to self
+                        cluster_task["assigned_to"] = self.node_id
+                        task["assigned_to"] = self.node_id
+                        debug_log(f"Cluster: No candidates in cache. Fallback: self-assign -> {self.node_id}")
+                except: pass
 
-            # Write to Shared Storage
             with open(task_file, "w", encoding="utf-8") as f:
                 json.dump(cluster_task, f, indent=2, ensure_ascii=False)
-            
             return filename
-        except Exception as e:
-            print(f"ClusterManager: Broadcast Error {e}")
-            return None
+        except: return None
 
     def claim_task(self, task_filename, node_id):
-        """Attempts to claim a task atomic-style."""
-        # Only claiming needs to be synchronous so we know result immediately
-        task_dir = os.path.join(self._cluster_path, "tasks")
-        lock_file = os.path.join(task_dir, f"{task_filename}.lock")
-        
+        task_dir, lock_file = os.path.join(self._cluster_path, "tasks"), os.path.join(self._cluster_path, "tasks", f"{task_filename}.lock")
         if os.path.exists(lock_file): return False
-            
         try:
-            # Atomic 'x' creation
-            with open(lock_file, "x") as f:
-                f.write(json.dumps({"claimed_by": node_id, "time": datetime.datetime.now().isoformat()}))
-            
-            # Update content
+            with open(lock_file, "x") as f: f.write(json.dumps({"claimed_by": node_id, "time": datetime.datetime.now().isoformat()}))
             task_path = os.path.join(task_dir, task_filename)
             if os.path.exists(task_path):
-                try:
-                    with open(task_path, "r+", encoding="utf-8") as f:
-                        data = json.load(f)
-                        data["claimed_by"] = node_id
-                        data["cluster_status"] = "Claimed"
-                        f.seek(0)
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                        f.truncate()
-                except: pass
+                with open(task_path, "r+", encoding="utf-8") as f:
+                    data = json.load(f); data["claimed_by"] = node_id; data["cluster_status"] = "Claimed";
+                    f.seek(0); json.dump(data, f, indent=2, ensure_ascii=False); f.truncate()
             return True
-        except:
-            return False
+        except: return False
 
-    def delete_cluster_task(self, base_name):
-        """Remove task file from cluster."""
+    def delete_cluster_task(self, base_name, cluster_filename=None):
         task_dir = os.path.join(self._cluster_path, "tasks")
         if not os.path.exists(task_dir): return
-        
         try:
-            for filename in os.listdir(task_dir):
-                if not filename.endswith(".json"): continue
-                if filename.startswith(base_name + "_") or filename == base_name:
-                     try:
-                         # Delete Task
-                         os.remove(os.path.join(task_dir, filename))
-                         # Delete Lock if exists
-                         lock = os.path.join(task_dir, filename + ".lock")
-                         if os.path.exists(lock): os.remove(lock)
-                     except: pass
+            if cluster_filename:
+                t = os.path.join(task_dir, cluster_filename)
+                if os.path.exists(t): os.remove(t)
+                l = t + ".lock"
+                if os.path.exists(l): os.remove(l)
+                return
+            s = "".join([c if c.isalnum() or c in ".-_" else "_" for c in base_name])
+            for f in os.listdir(task_dir):
+                if f.startswith(s + "_") or f == (s + ".json"):
+                    try:
+                        os.remove(os.path.join(task_dir, f))
+                        l = os.path.join(task_dir, f + ".lock")
+                        if os.path.exists(l): os.remove(l)
+                    except: pass
         except: pass

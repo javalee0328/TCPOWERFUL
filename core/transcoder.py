@@ -13,104 +13,136 @@ def debug_log(msg):
         pass
 
 class Transcoder:
+    # [v27.10.40] Class-level cache to avoid redundant disk/IO scans
+    _tool_cache = {}
+
     def __init__(self, ffmpeg_path=None, ffprobe_path=None):
         self.ffmpeg_path = ffmpeg_path if ffmpeg_path else self._resolve_tool("ffmpeg.exe")
         self.ffprobe_path = ffprobe_path if ffprobe_path else self._resolve_tool("ffprobe.exe")
         self.ffplay_path = self._resolve_tool("ffplay.exe")
-        debug_log(f"Transcoder Init: ffmpeg='{self.ffmpeg_path}', ffprobe='{self.ffprobe_path}', ffplay='{self.ffplay_path}'")
+        
+        # Only log init once per session if possible, or keep it quiet unless debug is needed
+        # debug_log(f"Transcoder Init: ffmpeg='{self.ffmpeg_path}', ffprobe='{self.ffprobe_path}', ffplay='{self.ffplay_path}'")
 
     def _resolve_tool(self, tool_name):
-        # 1. Bundled (PyInstaller _internal) or Development
-        # Check adjacent to sys.executable (The .exe file)
-        scan_paths = []
-        if getattr(sys, 'frozen', False):
-            exe_dir = os.path.dirname(sys.executable)
-            
-            # Check root adjacent (most likely for user)
-            scan_paths = [
-                os.path.join(exe_dir, tool_name),
-                os.path.join(exe_dir, 'core', tool_name),
-                os.path.join(exe_dir, 'bin', tool_name)
-            ]
-            
-            # Also check MEIPASS if we happened to bundle it (future proof)
-            if hasattr(sys, '_MEIPASS'):
-                 scan_paths.append(os.path.join(sys._MEIPASS, 'core', tool_name))
-                 # Fallback: check root of MEIPASS
-                 scan_paths.append(os.path.join(sys._MEIPASS, tool_name))
-            
-            for p in scan_paths:
-                if os.path.exists(p):
-                    return p
-                    
-            debug_log(f"WARNING: Count not find {tool_name} in scanned paths: {scan_paths}")
-                    
-        # 2. Local Dev (Explicit Project Path? No, usually in PATH or bin)
-        # 3. Fallback to System PATH
-        return tool_name.replace(".exe", "")
+        """Locates FFmpeg tools reliably across environments with caching."""
+        if tool_name in self._tool_cache:
+            return self._tool_cache[tool_name]
 
+        # 1. Bundled (PyInstaller) or Local adjacent
+        scan_paths = []
+        
+        # Determine base search directory
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        scan_paths = [
+            os.path.join(base_dir, tool_name),
+            os.path.join(base_dir, 'core', tool_name),
+            os.path.join(base_dir, 'bin', tool_name),
+            os.path.abspath(os.path.join(base_dir, "..", tool_name)),
+            os.path.abspath(os.path.join(base_dir, "..", "core", tool_name)),
+            os.path.join(os.getcwd(), tool_name),
+            os.path.join(os.getcwd(), 'core', tool_name),
+        ]
+        
+        # MEIPASS check
+        if hasattr(sys, '_MEIPASS'):
+             scan_paths.append(os.path.join(sys._MEIPASS, 'core', tool_name))
+             scan_paths.append(os.path.join(sys._MEIPASS, tool_name))
+        
+        for p in scan_paths:
+            if os.path.exists(p):
+                # Prevention: Don't let it resolve to the App Executable itself
+                if getattr(sys, 'frozen', False) and os.path.samefile(p, sys.executable):
+                    continue
+                self._tool_cache[tool_name] = p
+                return p
+        
+        # 2. PATH lookup (Last resort)
+        import shutil
+        sys_path = shutil.which(tool_name)
+        if sys_path:
+             # Double check to prevent recursion
+             is_me = False
+             if getattr(sys, 'frozen', False) and os.path.exists(sys.executable):
+                 try:
+                    if os.path.samefile(sys_path, sys.executable):
+                        is_me = True
+                 except: pass
+             
+             if not is_me:
+                 self._tool_cache[tool_name] = sys_path
+                 return sys_path
+
+        # 3. Only log WARNING if absolutely NOT found anywhere
+        debug_log(f"CRITICAL WARNING: Tool '{tool_name}' not found in any standard location or PATH.")
+        return None # Failed to resolve
     def get_duration(self, input_path):
-        """Returns duration in seconds using ffprobe."""
-        try:
-            cmd = [self.ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", input_path]
-            debug_log(f"Probe: {cmd}")
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
-            dur = float(result.stdout.strip())
-            debug_log(f"Probe Result: {dur}")
-            return dur
-        except Exception as e:
-            debug_log(f"Probe Failed: {e}")
-            return 0
+        """Returns duration in seconds using ffprobe. [v27.10.46] Added retries for Network/NAS."""
+        src = os.path.normpath(input_path)
+        
+        for attempt in range(3):
+            try:
+                cmd = [self.ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", src]
+                debug_log(f"Probe (Attempt {attempt+1}): {cmd}")
+                result = subprocess.run(
+                    cmd, 
+                    capture_output=True, 
+                    text=True, 
+                    encoding='utf-8',
+                    errors='replace',
+                    check=True, 
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0
+                )
+                dur = float(result.stdout.strip())
+                if dur > 0:
+                    return dur
+            except Exception as e:
+                debug_log(f"Probe Attempt {attempt+1} Failed: {e}")
+            
+            if attempt < 2:
+                time.sleep(1.0) # Wait a bit before retry
+        
+        return 0
 
     def construct_command(self, input_path, output_path, params):
-        """
-        Builds FFmpeg command list.
-        params schema: {
-            "vcodec": "h264_nvenc",
-            "acodec": "aac",
-            "in_point": "00:00:10",
-            "out_point": "00:00:20",
-            "bitrate": "5000k",
-            "growing": True
-        }
-        """
+        """Builds FFmpeg command list."""
+        # [FIX v27.10.8] Conservative Pathing: use normpath
+        src = os.path.normpath(input_path)
+        dst = os.path.normpath(output_path)
+        
+        # Start command
         cmd = [self.ffmpeg_path, "-progress", "-", "-nostats"]
         
-        # Growing file support (Low delay/real-time)
+        # Growing file support
         if params.get("growing"):
             cmd += ["-re"] 
 
         # In Point
-        if params.get("in_point"):
+        if params.get("in_point") and params.get("in_point") != "00:00:00.000":
             cmd += ["-ss", params["in_point"]]
 
-        cmd += ["-i", input_path]
+        cmd += ["-i", src]
 
-        # Out Point (relative to in_point if using -t, or absolute if using -to)
-        # Fix for Broken Timestamps (TS files): Prefer -t (Duration) over -to (Timestamp)
+        # Duration/Out point
         if params.get("duration"):
             cmd += ["-t", str(params["duration"])]
-        elif params.get("out_point") and params["out_point"] != "00:00:00" and params["out_point"] != "00:00:00.000":
-            cmd += ["-to", params["out_point"]]
 
-        # Video Params
+        # Video
         cmd += ["-c:v", params.get("vcodec", "libx264")]
-        cmd += ["-b:v", params.get("bitrate", "2000k")]
-        cmd += ["-pix_fmt", "yuv420p"] # Standard for compatibility
-        
-        # Resolution
-        res = params.get("resolution")
-        if res and str(res).strip() != "-" and "x" in str(res):
-            cmd += ["-s", str(res)]
-            
-        # FPS
+        if params.get("bitrate"):
+            cmd += ["-b:v", params["bitrate"]]
         if params.get("fps"):
             cmd += ["-r", str(params["fps"])]
-
-        # Audio Params
-        # Force PCM for MXF if not specified (AAC is invalid in MXF)
+        if params.get("resolution"):
+            cmd += ["-s", params["resolution"]]
+        
+        # Audio
         acodec = params.get("acodec", "aac")
-        is_mxf = output_path.lower().endswith(".mxf")
+        is_mxf = dst.lower().endswith(".mxf")
         
         if is_mxf and acodec == "aac":
             acodec = "pcm_s16le"
@@ -124,7 +156,7 @@ class Transcoder:
         # Only apply bitrate for compressed formats (aac, mp3), NOT pcm
         if "pcm" not in acodec:
              cmd += ["-b:a", "128k"]
-
+             
         # Audio Gain
         gain = params.get("audio_gain", 0.0)
         if gain == 'auto':
@@ -135,12 +167,12 @@ class Transcoder:
 
         # Metadata optimization (Fragmentation for Seeking while Writing)
         # Fixes "Cannot play growing MP4" without slow second pass
-        if output_path.lower().endswith(".mp4"):
+        if dst.lower().endswith(".mp4"):
             cmd += ["-movflags", "frag_keyframe+empty_moov+default_base_moof"]
 
         # Output
         cmd += ["-strict", "unofficial"]
-        cmd += ["-y", output_path]
+        cmd += ["-y", dst]
         
         return cmd
 

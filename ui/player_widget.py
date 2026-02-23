@@ -215,7 +215,9 @@ class FPSWorker(QThread):
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 
-            self.process = subprocess.Popen(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+            # [v27.10.17] Fix Ghost Windows
+            flags = 0x08000000 if os.name == 'nt' else 0
+            self.process = subprocess.Popen(cmd, capture_output=True, text=True, startupinfo=startupinfo, creationflags=flags)
             res, _ = self.process.communicate()
             res = res.strip()
             
@@ -259,7 +261,9 @@ class ThumbnailWorker(QThread):
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             
-            self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, startupinfo=startupinfo)
+            # [v27.10.17] Fix Ghost Windows
+            flags = 0x08000000 if os.name == 'nt' else 0
+            self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, startupinfo=startupinfo, creationflags=flags)
             try:
                 # Add Timeout to prevent freeze on corrupt files
                 image_data, _ = self.process.communicate(timeout=1.5) 
@@ -920,14 +924,25 @@ class VideoPlayerWidget(QWidget):
     def open_deinterlace_window(self):
         if not self.current_file: return
         
+        # [v27.10.13] Singleton: Close/Raise existing window
+        if hasattr(self, 'deint_win') and self.deint_win:
+            try:
+                if self.deint_win.isVisible():
+                    self.deint_win.activateWindow()
+                    self.deint_win.raise_()
+                    return
+                else:
+                    self.deint_win.close()
+            except: pass
+
         # Pause native player
         self.media_player.pause()
         
         # Open Window
-        # Open Window
         pos = self.media_player.position()
         self.deint_win = DeinterlaceWindow(self.current_file, self.ffplay_path, pos, self.media_player.duration(), self)
         self.deint_win.closed.connect(self.on_deinterlace_closed)
+        self.deint_win.setAttribute(Qt.WA_DeleteOnClose) # Cleanup on close
         self.deint_win.show()
         
         # Force focus to new window
@@ -1493,7 +1508,9 @@ class PreviewWindow(QWidget):
                 "-x", "1280", "-y", "720",
                 self.file_path
             ]
-            subprocess.Popen(cmd)
+            # [v27.10.17] Fix Ghost Windows
+            flags = 0x08000000 if os.name == 'nt' else 0
+            subprocess.Popen(cmd, creationflags=flags)
          except Exception as e:
             QMessageBox.warning(self, "Error", str(e))
             
@@ -1652,11 +1669,17 @@ class DeinterlaceWindow(QWidget):
             "-loglevel", "quiet",
             self.file_path
         ]
+
+        # [v27.10.13] Hide startup window to avoid taskbar icon flicker before embedding
+        startupinfo = None
+        creationflags = 0
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0 # SW_HIDE (0)
+            creationflags = subprocess.CREATE_NO_WINDOW 
         
-        # NOTE: We do NOT add -pause here anymore because we are using key toggle
-        # If we restart, we start playing.
-        
-        self.ffplay_process = subprocess.Popen(cmd)
+        self.ffplay_process = subprocess.Popen(cmd, startupinfo=startupinfo, creationflags=creationflags)
         
         import time
         self.playback_start_time = time.time()
@@ -1826,7 +1849,9 @@ class DeinterlaceWorker(QThread):
                         startupinfo = subprocess.STARTUPINFO()
                         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                     
-                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, startupinfo=startupinfo)
+                    # [v27.10.17] Fix Ghost Windows
+                    flags = 0x08000000 if os.name == 'nt' else 0
+                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, startupinfo=startupinfo, creationflags=flags)
                     raw_data, _ = proc.communicate()
                     
                     if raw_data:

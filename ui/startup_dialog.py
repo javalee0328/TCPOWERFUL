@@ -73,7 +73,6 @@ class StartupCheckDialog(QDialog):
             font-family: 'Microsoft YaHei UI', 'Segoe UI', 'Arial', sans-serif;
             letter-spacing: 1.2px;
             padding: 6px 0;
-            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
         """)
         layout.addWidget(self.lbl_title)
         
@@ -86,7 +85,6 @@ class StartupCheckDialog(QDialog):
             font-family: 'Microsoft YaHei UI', 'Segoe UI', sans-serif;
             font-weight: 600;
             letter-spacing: 0.6px;
-            text-shadow: 0 0 10px rgba(74, 158, 255, 0.5);
         """)
         layout.addWidget(self.lbl_stage)
         
@@ -141,7 +139,6 @@ class StartupCheckDialog(QDialog):
                     stop:0.5 rgba(74, 158, 255, 1.0), 
                     stop:1 rgba(42, 95, 255, 0.9));
                 border-radius: 4px;
-                box-shadow: 0 0 10px rgba(74, 158, 255, 0.5);
             }
         """)
         layout.addWidget(self.progress)

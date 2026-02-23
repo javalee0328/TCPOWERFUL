@@ -1,0 +1,17 @@
+    def delete_task(self, cluster_filename):
+        """
+        [v27.10.6] Helper to delete a task file from the cluster.
+        Used by Ghost Task Pruning in MainWindow.
+        """
+        try:
+            task_path = os.path.join(self._cluster_path, "tasks", cluster_filename)
+            if os.path.exists(task_path):
+                os.remove(task_path)
+                print(f"ClusterManager: Deleted task file {cluster_filename}")
+                
+            # Also remove from local cache to prevent re-sync
+            if self.worker and cluster_filename in self.worker._known_tasks:
+                 del self.worker._known_tasks[cluster_filename]
+                 
+        except Exception as e:
+            print(f"ClusterManager: delete_task error: {e}")

@@ -15,10 +15,19 @@ class WatchFolderEngine(QThread):
     def __init__(self, settings_manager, parent=None):
         super().__init__(parent)
         self.settings = settings_manager
-        self.processed_db_path = os.path.join(os.getcwd(), "watch_folder_history.json")
+        
+        # [v27.10.6.3] Unify Path Logic with Main UI
+        import sys
+        if getattr(sys, 'frozen', False):
+            base = os.path.dirname(sys.executable)
+        else:
+            base = os.getcwd()
+            
+        self.processed_db_path = os.path.normpath(os.path.join(base, "watch_folder_history.json"))
         self.processed_files = self.load_history() # Now a dict {path: mtime}
         self.is_running = False
         self._snapshot_requested = False # Flag for async request
+        self._last_seen_mtimes = {} # {file_path: mtime} from last scan cycle
 
     def request_snapshot(self):
         """Thread-safe request for a snapshot."""
@@ -61,6 +70,18 @@ class WatchFolderEngine(QThread):
     def stop(self):
         self.is_running = False
         print(f"WatchFolderEngine: Stopping...")
+    
+    def clear_history_for_paths(self, paths_to_clear):
+        """[v27.10.50] Allow UI to remove specific paths from processed history."""
+        changed = False
+        for path in paths_to_clear:
+            norm = os.path.normpath(path)
+            if norm in self.processed_files:
+                del self.processed_files[norm]
+                changed = True
+                print(f"WatchFolderEngine: Cleared history for: {os.path.basename(norm)}")
+        if changed:
+            self.save_history()
 
     def run(self):
         self.is_running = True
@@ -79,12 +100,21 @@ class WatchFolderEngine(QThread):
             except Exception as e:
                 print(f"WatchFolderEngine Thread Error: {e}")
             
-            # Sleep in intervals for responsiveness to stop signals
-            for _ in range(50): # 5 seconds total
+            # [v27.10.48] Tighter Polling: 1s total for faster detection
+            for _ in range(10): 
                 if not self.is_running or self._snapshot_requested: break
                 time.sleep(0.1)
 
     def scan(self):
+        # [v27.10.20] Fail-safe: Only Master is allowed to scan
+        current_role = self.settings.get("cluster_role", "Worker")
+        if current_role != "Master":
+             if not getattr(self, '_notified_wrong_role', False):
+                 print(f"WatchFolderEngine: Scissor! Engine is running but role is '{current_role}'. Aborting scan.")
+                 self._notified_wrong_role = True
+             return
+        self._notified_wrong_role = False
+
         watch_folders = self.settings.get("watch_folders", [])
         if not watch_folders:
             if not getattr(self, '_notified_empty', False):
@@ -92,6 +122,9 @@ class WatchFolderEngine(QThread):
                 self._notified_empty = True
             return
         self._notified_empty = False
+        
+        # [v27.8.7] State for appearance detection across all folders
+        current_files_mtimes = {}
 
         for wf in watch_folders:
             if not self.is_running: return
@@ -112,15 +145,9 @@ class WatchFolderEngine(QThread):
                     
                     file_path = os.path.normpath(os.path.join(path, filename))
                     
-                    # [FIX] Skip special directories (_DONE, _ERROR, _TEMP)
                     if os.path.isdir(file_path):
-                        dir_name = os.path.basename(file_path)
-                        if dir_name in ["_DONE", "_ERROR", "_TEMP"]:
-                            continue
-                    
-                    if not os.path.isfile(file_path):
-                        continue
-                    
+                        continue # [v27.7] Strict: Ignore all subdirectories
+
                     # Extension filter
                     ext = os.path.splitext(filename)[1].lower()
                     if ext not in [".mxf", ".mp4", ".mov", ".mkv", ".ts", ".mpg", ".avi", ".wmv"]:
@@ -130,31 +157,59 @@ class WatchFolderEngine(QThread):
                     if filename.startswith(".") or filename.startswith("~$"):
                         continue
                         
-                    # [FIX] Check mtime for duplicates/updates
+                    # Rule 1 & 2 Detection (Scan-to-Scan Comparison)
                     try:
                         current_mtime = os.path.getmtime(file_path)
                     except:
                         continue # File might be locked or gone
 
-                    # If file not in DB OR mtime changed -> Process
-                    last_mtime = self.processed_files.get(file_path, -1)
+                    current_files_mtimes[file_path] = current_mtime
                     
-                    # Fuzzy match for float precision issues (optional, but == usually check exact matches)
-                    # Let's use exact inequality for now.
-                    if last_mtime != current_mtime:
-                        print(f"WatchFolderEngine: Checking potential file: {filename} (New/Modified)")
-                        # Stability check: ensure file is not being copied
+                    # [v27.8.7] "No Limits": Trigger if file is NEW to this scan, or mtime changed
+                    is_new_appearance = file_path not in self._last_seen_mtimes
+                    mtime_changed = (file_path in self._last_seen_mtimes and self._last_seen_mtimes[file_path] != current_mtime)
+                    
+                    # [v27.10.1] CRITICAL FIX: Only generate tasks on NEW files
+                    # mtime_changed means file is being copied/modified - DON'T generate duplicate tasks!
+                    if is_new_appearance:
+                        # [v27.9.3] Persistence Check: Ignore if already processed with same mtime
+                        last_processed_mtime = self.processed_files.get(file_path, 0)
+                        if last_processed_mtime == current_mtime:
+                            # [v27.10.50] RE-DETECTION GUARD:
+                            # On fresh restart, _last_seen_mtimes is empty.
+                            # A match in processed_files does NOT mean a live cluster task exists.
+                            # We skip ONLY if we have already seen this file in THIS session.
+                            # This prevents permanent skip of files like 11集.
+                            if len(self._last_seen_mtimes) > 0:
+                                # We've already scanned once this session - safe to skip.
+                                current_files_mtimes[file_path] = current_mtime 
+                                continue
+                            else:
+                                # First scan of session - DO NOT skip, re-emit to be safe.
+                                print(f"WatchFolderEngine: [RE-DETECT] First scan: re-emitting known file: {filename}")
+                                # Fall through to detection logic below
+
+                        print(f"WatchFolderEngine: [EVENT] NEW FILE Detected: {filename}")
                         if self.is_file_ready(file_path):
-                            print(f"WatchFolderEngine: NEW FILE READY: {filename}")
+                            print(f"WatchFolderEngine: [READY] Emit detected signal: {filename}")
+                            # Update persistent history
                             self.processed_files[file_path] = current_mtime
                             self.save_history()
                             self.file_detected.emit(file_path, wf.get("name", "WatchFolder"))
                         else:
-                            # print(f"WatchFolderEngine: File not ready yet: {filename}")
+                            # If not ready, we DON'T add it to current_files_mtimes yet 
                             pass
+                    elif mtime_changed:
+                        print(f"WatchFolderEngine: [UPDATE] File {filename} updated (mtime changed)")
+                        # [v27.10.49] Even if it's updated, it will be added to mtimes below 
+                        # so it doesn't trigger 'is_new_appearance' yet.
+                        current_files_mtimes[file_path] = current_mtime
                             
             except Exception as e:
                 print(f"WatchFolderEngine Scan Error [{path}]: {e}")
+        
+        # Update _last_seen_mtimes for the next scan cycle
+        self._last_seen_mtimes = current_files_mtimes
 
     def is_file_ready(self, file_path):
         """Checks if a file is ready for processing (no size growth and can be opened)."""
@@ -162,22 +217,33 @@ class WatchFolderEngine(QThread):
             if not os.path.exists(file_path): return False
             
             size1 = os.path.getsize(file_path)
-            # [OPTIMIZED] Short wait to check for growth (0.5s for faster response)
-            time.sleep(0.5)
+            # [v27.10.46] Increased wait to 1.5s for slow NAS stability
+            time.sleep(1.5)
             if not self.is_running: return False
             size2 = os.path.getsize(file_path)
             
             if size1 == size2 and size1 > 0:
-                # Try opening for reading - if this fails on Windows, it's often because another process has it open for writing
+                # [FIX v27.9.17] For network shares (SMB), open() can fail with PermissionError 
+                # even when the file is not actually locked. Size stability is more reliable.
+                # Try opening for reading but DON'T block if it fails - just warn
                 try:
                     # Using "rb" is safer for read-only shares than "ab"
                     with open(file_path, "rb") as f:
                         # Can we read at least one byte?
                         f.read(1)
-                        return True
                 except (IOError, PermissionError) as e:
-                    # print(f"WatchFolderEngine: File '{os.path.basename(file_path)}' locked: {e}")
-                    return False
+                    # [FIX v27.9.17] Don't block on network permission errors
+                    # If size is stable, the file is likely ready despite permission issues
+                    print(f"WatchFolderEngine: WARNING - File '{os.path.basename(file_path)}' open test failed: {e}")
+                    print(f"WatchFolderEngine: Proceeding anyway since size is stable ({size1} bytes)")
+                
+                # [FIX v27.9.17] Return True if size is stable, regardless of open() result  
+                return True
+            else:
+                if size1 != size2:
+                    print(f"WatchFolderEngine: File '{os.path.basename(file_path)}' still growing ({size1} -> {size2})")
+                elif size1 == 0:
+                    print(f"WatchFolderEngine: File '{os.path.basename(file_path)}' is empty (size 0)")
         except Exception as e:
             print(f"WatchFolderEngine: Error checking file readiness: {e}")
         return False
@@ -233,13 +299,8 @@ class WatchFolderEngine(QThread):
                 except Exception as e:
                     print(f"Snapshot Scan Error {target_dir}: {e}")
 
-            # 1. Scan Root (Pending)
+            # [v27.7] Strict: Only scan Root (Pending/Active)
+            # Other subdirectories (_DONE, _ERROR) are now ignored as per user request.
             scan_dir(path, 'pending')
-            
-            # 2. Scan _DONE
-            scan_dir(os.path.join(path, "_DONE"), 'done')
-            
-            # 3. Scan _ERROR
-            scan_dir(os.path.join(path, "_ERROR"), 'error')
             
         return snapshot
