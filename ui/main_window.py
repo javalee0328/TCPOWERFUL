@@ -6317,9 +6317,35 @@ class ModernTranscoderUI(QMainWindow):
         """Update cluster node status in the Dashboard (e.g. status bar)."""
         # print(f"DEBUG_UI: on_cluster_node_updated called with {node_data}")
         node_id = node_data.get("node_id")
-        alias = node_data.get("alias") or node_id
-        self.node_aliases[node_id] = alias # [NEW] Populate Alias Map
-        
+        alias = node_data.get("alias") or ""
+        if alias and alias != node_id:
+            self.node_aliases[node_id] = alias  # [NEW] Populate Alias Map
+            # [v27.10.57] Retroactive refresh: push alias to existing widgets
+            try:
+                def refresh_list_aliases(list_widget):
+                    for i in range(list_widget.count()):
+                        item = list_widget.item(i)
+                        w = list_widget.itemWidget(item)
+                        if not w: continue
+                        td = getattr(w, 'task_data', None)
+                        if not td: continue
+                        wid = td.get("worker_id", "") or ""
+                        wuuid = td.get("worker_uuid", "") or ""
+                        # Match by node_id (full UUID or short name)
+                        if wid == node_id or wuuid == node_id or alias == wid:
+                            curr = w.lbl_node.text()
+                            if curr != alias:
+                                w.lbl_node.setText(alias)
+                                w.lbl_node.setToolTip(f"{alias}\n({node_id})")
+                refresh_list_aliases(self.manual_task_list)
+                refresh_list_aliases(self.auto_task_list)
+            except Exception as e:
+                debug_log(f"Alias refresh error: {e}")
+        else:
+            if node_id not in self.node_aliases:
+                self.node_aliases[node_id] = node_id  # fallback
+
+
         status = node_data.get("status", "")
         
         # Search for existing row
