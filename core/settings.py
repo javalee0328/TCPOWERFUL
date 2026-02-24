@@ -26,7 +26,7 @@ else:
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 
 # [VERSIONING]
-CURRENT_VERSION = "v27.10.55"
+CURRENT_VERSION = "v27.10.56"
 
 # [DEBUG]
 try:
