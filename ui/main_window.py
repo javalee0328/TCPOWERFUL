@@ -958,17 +958,18 @@ class TaskProgressWidget(QWidget):
         worker_id = task.get("worker_id", "-")
         worker_uuid = task.get("worker_uuid", worker_id)
 
-        # [v27.10.56] Show alias: prefer _known_nodes alias, then task_data alias, then worker_id
+        # [v27.10.56] Show alias via QApplication top-level window lookup
+        # parent() traversal fails for QListWidget item widgets - use app-level search
         display_node = worker_id
         alias = task.get("worker_alias", "") or ""
         if not alias:
             try:
-                parent = self.parent()
-                while parent and not hasattr(parent, 'cluster_mgr'):
-                    parent = parent.parent()
-                if parent and hasattr(parent, 'cluster_mgr'):
-                    node_data = parent.cluster_mgr._known_nodes.get(worker_id, {})
-                    alias = node_data.get("alias", "") or ""
+                from PySide6.QtWidgets import QApplication
+                for w in QApplication.topLevelWidgets():
+                    if hasattr(w, 'cluster_mgr'):
+                        node_data = w.cluster_mgr._known_nodes.get(worker_id, {})
+                        alias = node_data.get("alias", "") or ""
+                        break
             except Exception:
                 alias = ""
 
@@ -984,6 +985,7 @@ class TaskProgressWidget(QWidget):
         if worker_uuid != worker_id:
             tooltip += f"\n(ID: {worker_uuid})"
         self.lbl_node.setToolTip(tooltip)
+
 
         # [NEW/RESTORED] Populate Finish Time and Target Path
         fin_time = task.get("finish_time", "-")
@@ -3941,7 +3943,8 @@ class ModernTranscoderUI(QMainWindow):
         # [NEW] Pre-populate Claiming Node Visibility
         claimed_by = extra_data.get("claimed_by") if extra_data else None
         if claimed_by:
-            display_node = claimed_by.split('-')[0]
+            # [v27.10.56] Look up alias from node_aliases map (populated by cluster heartbeat)
+            display_node = self.node_aliases.get(claimed_by, claimed_by.split('-')[0])
             widget.lbl_node.setText(display_node)
             widget.lbl_node.setStyleSheet("color: #BB86FC; font-weight: bold;")
             widget.lbl_status.setText("Claimed")
@@ -5183,8 +5186,9 @@ class ModernTranscoderUI(QMainWindow):
                  widget.lbl_status.setText("Pending")
                  
                  if claimed:
-                     short_node = claimed.split('-')[0]
-                     widget.lbl_node.setText(short_node)
+                     # [v27.10.56] Use alias from node_aliases map
+                     node_display = self.node_aliases.get(claimed, claimed.split('-')[0])
+                     widget.lbl_node.setText(node_display)
                      widget.lbl_node.setStyleSheet("color: #BB86FC; font-weight: bold;")
                      widget.lbl_status.setText("Claimed")
                      widget.lbl_status.setStyleSheet("color: #BB86FC; font-weight: bold;")
