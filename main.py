@@ -14,12 +14,14 @@ import time
 from datetime import datetime
 
 # [v27.9.13] File logging setup
-log_file = os.path.join(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))), 'debug.log')
+# [v27.10.60] Centralized logging in 'data' subfolder
+from core.settings import DATA_DIR
+log_file = os.path.join(DATA_DIR, 'debug.log')
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_file, mode='w', encoding='utf-8'),
+        logging.FileHandler(log_file, mode='a', encoding='utf-8'), # Use append to match settings.py behavior
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -55,19 +57,36 @@ if __name__ == "__main__":
     from PySide6.QtWidgets import QMessageBox
     from PySide6.QtCore import Qt, QLockFile, QDir, QSharedMemory
     
-    # 1. Mutex Check (Primary for Windows)
+    # 1. Mutex Check (Primary for Windows) with Retry Loop for Restarts
     MUTEX_NAME = "ProTranscoder_Single_Instance_Mutex"
     kernel32 = ctypes.windll.kernel32
-    try:
-        _app_mutex = kernel32.CreateMutexW(None, False, MUTEX_NAME)
-        last_error = kernel32.GetLastError()
-        print(f"DEBUG: Mutex Handle: {_app_mutex}, Last Error: {last_error}")
-    except Exception as e:
-        print(f"Mutex Error: {e}")
-        last_error = 0
+    is_running = False
     
-    ERROR_ALREADY_EXISTS = 183
-    is_running = (last_error == ERROR_ALREADY_EXISTS)
+    # [v27.10.63] Retry loop: Give previous instance up to 5s to release Mutex
+    # This solves the race condition where the new instance starts before the old one is fully closed.
+    for i in range(10): 
+        try:
+            _app_mutex = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+            last_error = kernel32.GetLastError()
+            ERROR_ALREADY_EXISTS = 183
+            if last_error != ERROR_ALREADY_EXISTS:
+                is_running = False
+                break
+            else:
+                is_running = True
+                # [v27.10.64] IMPORTANT: Close the handle to the existing mutex before retrying.
+                # If we don't, we are holding a reference to it, preventing it from being released!
+                if _app_mutex:
+                    kernel32.CloseHandle(_app_mutex)
+                
+                # Mutex exists, wait and retry
+                if i < 9: 
+                    time.sleep(0.5) 
+        except:
+            is_running = False
+            break
+
+
 
     # 2. LockFile Check (Backup) with Stale Lock Cleanup
     # Bind to app to ensure lifetime
@@ -109,8 +128,10 @@ if __name__ == "__main__":
     
     if is_running:
         # Already exists!
+        from core.settings import CURRENT_VERSION
         msg = QMessageBox()
-        msg.setWindowTitle("ProTranscoder 2026")
+        msg.setWindowTitle(f"ProTranscoder 2026 ({CURRENT_VERSION})")
+
         msg.setText("程式已在運行中 (Already Running)")
         msg.setInformativeText("請切換至已開啟的視窗。\n\nPlease switch to the existing window.")
         msg.setStandardButtons(QMessageBox.Ok)

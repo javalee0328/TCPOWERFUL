@@ -4,13 +4,8 @@ import time
 
 import sys
 
-def debug_log(msg):
-    try:
-        log_path = os.path.join(os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.getcwd(), "debug.log")
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - [CORE] {msg}\n")
-    except:
-        pass
+from core.settings import debug_log
+
 
 class Transcoder:
     # [v27.10.40] Class-level cache to avoid redundant disk/IO scans

@@ -16,14 +16,9 @@ class WatchFolderEngine(QThread):
         super().__init__(parent)
         self.settings = settings_manager
         
-        # [v27.10.6.3] Unify Path Logic with Main UI
-        import sys
-        if getattr(sys, 'frozen', False):
-            base = os.path.dirname(sys.executable)
-        else:
-            base = os.getcwd()
-            
-        self.processed_db_path = os.path.normpath(os.path.join(base, "watch_folder_history.json"))
+        from core.settings import get_app_path
+        self.processed_db_path = get_app_path("watch_folder_history.json")
+
         self.processed_files = self.load_history() # Now a dict {path: mtime}
         self._last_seen_mtimes = {}  # mtime from last scan
         self._seen_this_session = set()  # [v27.10.52] Files seen at least once this session
@@ -166,33 +161,42 @@ class WatchFolderEngine(QThread):
 
                     current_files_mtimes[file_path] = current_mtime
                     
-                    # [v27.8.7] "No Limits": Trigger if file is NEW to this scan, or mtime changed
+                    # [v27.10.61] Determine if this file is "new" to the current scan cycle
                     is_new_appearance = file_path not in self._last_seen_mtimes
                     mtime_changed = (file_path in self._last_seen_mtimes and self._last_seen_mtimes[file_path] != current_mtime)
                     
-                    # [v27.10.52] TASK GENERATION GUARANTEE:
-                    # History is NEVER used to skip task creation.
-                    # Only _seen_this_session prevents re-emitting every 1-second poll.
-                    # This ensures every file in the watch folder ALWAYS generates a task.
                     if is_new_appearance:
                         if file_path in self._seen_this_session:
                             # Already handled in this session - skip to avoid duplicate every poll
                             current_files_mtimes[file_path] = current_mtime
                             continue
-                        # else: fall through - always emit (history check removed)
+                        
+                        # [v27.10.61] KEY FIX: If the file is already in persistent history
+                        # WITH THE SAME mtime, it was processed in a prior session.
+                        # Skip it silently to prevent re-queuing on every app restart.
+                        hist_mtime = self.processed_files.get(file_path)
+                        if hist_mtime is not None and abs(hist_mtime - current_mtime) < 2.0:
+                            # File is unchanged since last run. Mark as seen so we don't re-check.
+                            self._seen_this_session.add(file_path)
+                            current_files_mtimes[file_path] = current_mtime
+                            continue
 
                         print(f"WatchFolderEngine: [EVENT] NEW FILE Detected: {filename}")
                         if self.is_file_ready(file_path):
                             print(f"WatchFolderEngine: [READY] Emit detected signal: {filename}")
-                            # Update persistent history
-                            self.processed_files[file_path] = current_mtime
-                            self.save_history()
-                            # [v27.10.52] Mark as seen this session so subsequent scans won't re-emit
+                            # [v27.10.61 FIX] Emit FIRST, THEN update history.
+                            # If we update history before emitting, WatchTaskCreationThread
+                            # always sees is_repeat=True and adds an HHMMSS timestamp.
+                            # By emitting first, history is empty for this file → is_repeat=False.
                             self._seen_this_session.add(file_path)
                             self.file_detected.emit(file_path, wf.get("name", "WatchFolder"))
+                            # Update persistent history AFTER emit
+                            self.processed_files[file_path] = current_mtime
+                            self.save_history()
                         else:
                             # If not ready, we DON'T add it to current_files_mtimes yet 
                             pass
+
                     elif mtime_changed:
                         print(f"WatchFolderEngine: [UPDATE] File {filename} updated (mtime changed)")
                         # [v27.10.49] Even if it's updated, it will be added to mtimes below 

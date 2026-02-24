@@ -24,6 +24,8 @@ class ClusterWorker(QObject):
     def __init__(self, cluster_path, node_id, settings_dict):
         super().__init__()
         self._cluster_path = cluster_path
+        # [v27.10.60] Identify if this is a placeholder path to avoid root clutter
+        self._path_is_placeholder = settings_dict.get("_path_is_placeholder", False)
         self.node_id = node_id
         # We pass a dict copy of settings to avoid thread safety issues with SettingsManager
         self.settings = settings_dict 
@@ -89,15 +91,24 @@ class ClusterWorker(QObject):
 
 
     def initialize_structure(self):
-        """Create necessary subdirectories."""
+        """Create necessary subdirectories only if a valid path is provided."""
         try:
+            # [v27.10.60] Strictly defer if marked as placeholder or no path set
+            if self._path_is_placeholder or not self._cluster_path:
+                print(f"ClusterWorker: Deferring folder creation (Placeholder Path)")
+                return
+            
+            # Further safety: If it points to app root/CLUSTER_SYNC, double check if it's absolute
+            if not os.path.isabs(self._cluster_path):
+                return
+
             if not os.path.exists(self._cluster_path):
-                os.makedirs(self._cluster_path)
+                os.makedirs(self._cluster_path, exist_ok=True)
             
             for sub in ["nodes", "tasks", "logs"]:
                 path = os.path.join(self._cluster_path, sub)
                 if not os.path.exists(path):
-                    os.makedirs(path)
+                    os.makedirs(path, exist_ok=True)
             print(f"ClusterWorker: Initialized structure at {self._cluster_path}")
         except Exception as e:
             print(f"ClusterWorker: Init Error - {e}")
@@ -472,22 +483,33 @@ class ClusterManager(QObject):
         mac = str(uuid.getnode())[-6:]
         self.node_id = f"{socket.gethostname()}-{mac}"
         from core.settings import BASE_DIR
-        default_cluster_path = os.path.join(BASE_DIR, "CLUSTER_SYNC")
-        raw_path = self.settings.get("cluster_path", default_cluster_path)
-        if not os.path.isabs(raw_path):
-            self._cluster_path = os.path.abspath(os.path.join(BASE_DIR, raw_path))
+        
+        # [v27.10.60] Check if path is explicitly set in settings
+        raw_path = self.settings.get("cluster_path")
+        if not raw_path:
+            # No path saved. Use relative placeholder but mark as placeholder.
+            self._cluster_path = os.path.join(BASE_DIR, "CLUSTER_SYNC")
+            self._path_is_placeholder = True
+        elif not os.path.isabs(raw_path):
+             # Relative path saved. Treat as placeholder/relative deferred.
+             self._cluster_path = os.path.abspath(os.path.join(BASE_DIR, raw_path))
+             self._path_is_placeholder = True
         else:
             self._cluster_path = os.path.normpath(raw_path)
-        try:
-            if not os.path.exists(self._cluster_path):
-                os.makedirs(self._cluster_path, exist_ok=True)
-        except:
-            import tempfile
-            self._cluster_path = os.path.join(tempfile.gettempdir(), "ProTranscoder_Cluster")
-            if not os.path.exists(self._cluster_path):
-                os.makedirs(self._cluster_path, exist_ok=True)
+            self._path_is_placeholder = False
         
-        debug_log(f"[CLUSTER] Confirmed Sync Path: {self._cluster_path}")
+        # Only create if it's a real, absolute, and non-placeholder path
+        if not self._path_is_placeholder:
+            try:
+                if not os.path.exists(self._cluster_path):
+                    os.makedirs(self._cluster_path, exist_ok=True)
+            except:
+                import tempfile
+                self._cluster_path = os.path.join(tempfile.gettempdir(), "ProTranscoder_Cluster")
+                if not os.path.exists(self._cluster_path):
+                    os.makedirs(self._cluster_path, exist_ok=True)
+
+        debug_log(f"[CLUSTER] Init Path: {self._cluster_path} (Placeholder: {self._path_is_placeholder})")
 
         self.worker = None
         self.thread = None
@@ -508,7 +530,8 @@ class ClusterManager(QObject):
             "cluster_sync_tasks": self.settings.get("cluster_sync_tasks", True),
             "cluster_role": self.settings.get("cluster_role", "Master"),
             "watch_folders": self.settings.get("watch_folders", []),
-            "worker_alias": self.settings.get("worker_alias")
+            "worker_alias": self.settings.get("worker_alias"),
+            "_path_is_placeholder": self._path_is_placeholder
         }
         self.worker = ClusterWorker(self._cluster_path, self.node_id, settings_snapshot)
         self.worker.moveToThread(self.thread)
@@ -544,9 +567,18 @@ class ClusterManager(QObject):
             self.thread.wait(2000) 
             self.thread = None
             self.worker = None
-        if new_path: self._cluster_path = new_path
+        if new_path:
+            self._cluster_path = new_path
+            # [v27.10.61] If a real absolute path is provided, lift the placeholder lock
+            # so heartbeats and directory creation work correctly.
+            if os.path.isabs(new_path):
+                self._path_is_placeholder = False
+                debug_log(f"[CLUSTER] Restart: Placeholder mode LIFTED. Active path: {new_path}")
+            else:
+                self._path_is_placeholder = True
         self._known_nodes_cache = {}
         self.start()
+
 
     def promote_to_master(self):
         if self.worker: self.worker.promote_to_master()
@@ -606,7 +638,9 @@ class ClusterManager(QObject):
             filename = f"{sanitized_name}_{path_hash}.json"
             
             tasks_dir = os.path.join(self._cluster_path, "tasks")
-            if not os.path.exists(tasks_dir): os.makedirs(tasks_dir, exist_ok=True)
+            if not self._path_is_placeholder:
+                if not os.path.exists(tasks_dir): os.makedirs(tasks_dir, exist_ok=True)
+            
             task_file = os.path.join(tasks_dir, filename)
             
             cluster_task = task.copy()

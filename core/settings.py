@@ -3,34 +3,47 @@ import os
 import sys
 import time
 
+def get_app_path(filename):
+    """[v27.10.60] Centralized helper to get path in the 'data' directory."""
+    try:
+        from core.settings import DATA_DIR
+        return os.path.normpath(os.path.join(DATA_DIR, filename))
+    except:
+        return filename
+
 def debug_log(msg):
     try:
-        # Resolve log path same as settings to ensure visibility
-        if getattr(sys, 'frozen', False):
-            base = os.path.dirname(sys.executable)
-        else:
-            base = os.getcwd()
-        with open(os.path.join(base, "debug.log"), "a", encoding="utf-8") as f:
+        log_path = get_app_path("debug.log")
+        if not os.path.exists(os.path.dirname(log_path)):
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - [SETTINGS] {msg}\n")
     except:
         pass
 
 if getattr(sys, 'frozen', False):
     # Running as compiled exe
-    # [FIX] Use explicit Exe Dir, avoid cwd ambiguity
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     # Running as script
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
+# [v27.10.60] Consolidate app data into 'data' subfolder
+DATA_DIR = os.path.join(BASE_DIR, "data")
+if not os.path.exists(DATA_DIR):
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except: pass
+
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 
 # [VERSIONING]
 CURRENT_VERSION = "v27.10.59"
 
-# [DEBUG]
+# [v27.10.60] Relocate startup log to 'data'
 try:
-    with open(os.path.join(BASE_DIR, "debug_startup.log"), "a") as f:
+    with open(os.path.join(DATA_DIR, "debug_startup.log"), "a") as f:
         f.write(f"Startup BaseDir: {BASE_DIR}\n")
         f.write(f"Settings Path: {SETTINGS_FILE}\n")
 except: pass
@@ -139,23 +152,8 @@ class SettingsManager:
             except Exception as e:
                 debug_log(f"Error loading settings: {e}")
         else:
-            # [FIX] Clean up CLUSTER_SYNC on fresh install to prevent ghost tasks
-            try:
-                cluster_path = os.path.join(os.getcwd(), "CLUSTER_SYNC")
-                if os.path.exists(cluster_path):
-                    debug_log(f"[SETTINGS] Cleaning cluster path on fresh install: {cluster_path}")
-                    import shutil
-                    for sub in ["tasks", "nodes", "master.lock", "watch_config.json"]:
-                        p = os.path.join(cluster_path, sub)
-                        if os.path.exists(p):
-                            if os.path.isdir(p): 
-                                shutil.rmtree(p, ignore_errors=True)
-                            else: 
-                                os.remove(p)
-            except Exception as e:
-                debug_log(f"[SETTINGS] Cluster cleanup failed: {e}")
-                
-            # [FIX] For fresh install/reset, use marker to avoid prompt
+            # [REMOVED v27.10.60] CLUSTER_SYNC is no longer auto-created or cleaned here.
+            # Creation is deferred until a path is explicitly saved in Settings UI.
             self.settings["app_version"] = "NEW_INSTALL"
             debug_log("Settings: Fresh install marker set.")
 

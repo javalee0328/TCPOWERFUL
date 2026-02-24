@@ -13,36 +13,22 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QSize, QProcess, QTimer, QDir, QEvent, Signal, QRectF, QThread, QTime
 from PySide6.QtGui import QIcon, QAction, QKeySequence, QShortcut, QPixmap, QPainter, QPainterPath, QPen, QColor, QKeyEvent, QBrush, QPalette
-from core.settings import SettingsManager
+from core.settings import (
+    SettingsManager, DATA_DIR, get_app_path, debug_log, CURRENT_VERSION
+)
 from core.metadata import get_video_metadata
 from core.preset_data import PRESETS
 from core.watch_folder import WatchFolderEngine
 from core.cluster_manager import ClusterManager
+
 import subprocess
 import logging
 import traceback
 import re
 import shutil
 
-def get_app_path(filename):
-    """Centralized helper to always get absolute path in the application directory."""
-    try:
-        if getattr(sys, 'frozen', False):
-            base = os.path.dirname(sys.executable)
-        else:
-            # For development, use project root
-            base = os.getcwd()
-        return os.path.normpath(os.path.join(base, filename))
-    except:
-        return filename
+# helpers removed - using core.settings version
 
-def debug_log(msg):
-    try:
-        log_path = get_app_path("debug.log")
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {msg}\n")
-    except:
-        pass
 
 class TranscodeWorker(QThread):
     progress_signal = Signal(int, str) # percent, text_status
@@ -1689,8 +1675,9 @@ class ModernTranscoderUI(QMainWindow):
             msg = QMessageBox(self)
             msg.setWindowTitle("版本更新確認 (Version Update)")
             old_v = self.settings.get('app_version', '0.0.0')
-            new_v = "v27.10.38" # Corrected to direct assignment for display
+            new_v = CURRENT_VERSION
             msg.setText(f"偵測到新版本！系統已從 {old_v} 更新至 {new_v}。")
+
             msg.setInformativeText("您希望[重新設置 (Factory Reset)] 獲取乾淨環境，還是 [載入其餘舊設定]？")
             btn_load = msg.addButton("載入舊設定 (Keep Settings)", QMessageBox.AcceptRole)
             btn_reset = msg.addButton("重新設置 (Factory Reset)", QMessageBox.DestructiveRole) 
@@ -1712,62 +1699,8 @@ class ModernTranscoderUI(QMainWindow):
                 debug_log("User chose to keep settings on version upgrade.")
                 # Already stamped above
 
-    def do_factory_reset(self, silent=False):
-        """Wipes all settings and history for a clean slate."""
-        import subprocess
-        try:
-            # 1. Settings
-            if hasattr(self, 'settings') and os.path.exists(self.settings.SETTINGS_FILE):
-                try:
-                    os.remove(self.settings.SETTINGS_FILE)
-                except: pass
-            
-            # 2. Watch Config
-            if hasattr(self, 'cluster_manager'):
-                 cluster_path = getattr(self.cluster_manager, '_cluster_path', '')
-                 if cluster_path:
-                     cluster_conf = os.path.join(cluster_path, "watch_config.json")
-                     if os.path.exists(cluster_conf):
-                        try: os.remove(cluster_conf)
-                        except: pass
-                
-            # 3. History
-            # [v27.10.17] Wipe processed_files.json and watch_folder_history.json
-            from core.settings import BASE_DIR
-            
-            history_files = [
-                "watch_folder_history.json",
-                "processed_files.json",
-                "restart_history.json"
-            ]
-            
-            for hf in history_files:
-                p = os.path.join(BASE_DIR, hf)
-                if os.path.exists(p):
-                    try:
-                        os.remove(p)
-                        debug_log(f"Factory Reset: Deleted {hf}")
-                    except: pass
-            
-            if not silent:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.information(self, "重置完成", "系統已重置，將重新啟動。")
-            
-            # Restart
-            # Determine executable for restart
-            if getattr(sys, 'frozen', False):
-                exe = sys.executable
-                subprocess.Popen([exe])
-            else:
-                subprocess.Popen([sys.executable] + sys.argv)
-                
-            QApplication.quit()
-            
-        except Exception as e:
-            debug_log(f"Factory Reset Error: {e}")
-            if not silent:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.warning(self, "Error", f"重置失敗: {e}")
+    # Removed duplicated do_factory_reset to use consolidated version below.
+
 
     def update_dashboard_badge(self):
         """Adds a visual indicator to Dashboard button if background tasks exist."""
@@ -1794,23 +1727,7 @@ class ModernTranscoderUI(QMainWindow):
                 self.btn_dash.setStyleSheet("")
         except: pass
 
-    def save_global_settings_ui(self):
-        """Saves global settings from the UI, specifically for cluster/worker configuration."""
-        self.settings.set("cluster_path", self.edit_cluster_path.text())
-        self.settings.set("max_parallel_tasks", self.spin_parallel.value())
-        self.settings.set("worker_output_path", self.edit_worker_out.text())
-        self.settings.set("worker_alias", self.edit_node_alias.text()) # [NEW]
-        
-        # Trigger Cluster UI refresh if path changed?
-        if hasattr(self, 'cluster_mgr'):
-            self.cluster_mgr.reinit(self.edit_cluster_path.text())
-            # [NEW] Immediate Heartbeat Update with new alias
-            try:
-                self.cluster_mgr.reinit_heartbeat()
-            except: pass
-            
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(self, "Settings Saved", "設定已儲存 (Settings Saved)")
+    # [REMOVED] Redundant definition of save_global_settings_ui (the primary one is at line 4551)
 
     def save_settings(self):
         if getattr(self, 'loading', False) or getattr(self, '_reset_in_progress', False):
@@ -2211,12 +2128,12 @@ class ModernTranscoderUI(QMainWindow):
         btn_save_s.clicked.connect(self.save_global_settings_ui)
         s_layout.addLayout(s_form)
         
-        # [NEW] Maintenance Actions
         maint_layout = QHBoxLayout()
-        btn_reset = QPushButton("⚠️ 工廠重置 (Factory Reset / Clear Cache)")
+        btn_reset = QPushButton("⚠️ 原廠預設 (Reset to Default)")
         btn_reset.setStyleSheet("background-color: #631212; color: #ffcccc; border: 1px solid #821414;")
         btn_reset.clicked.connect(self.do_factory_reset)
         maint_layout.addWidget(btn_reset)
+
         maint_layout.addStretch()
         
         s_layout.addLayout(maint_layout)
@@ -4656,15 +4573,15 @@ class ModernTranscoderUI(QMainWindow):
         QMessageBox.information(self, "設定成功", msg)
 
     def do_factory_reset(self, silent=False):
-        """Clears all settings, history, and cache, then relaunch."""
+        """[v27.10.65] Consolidated robust reset. Clears settings, history, and cache, then relaunch."""
         self._reset_in_progress = True # [FIX] Block all exit saves
         
         if not silent:
             from PySide6.QtWidgets import QMessageBox
             msg = QMessageBox(self)
-            msg.setWindowTitle("工廠重置 (Factory Reset)")
-            msg.setText("此操作將清除所有設定、歷史紀錄與集群快取！")
-            msg.setInformativeText("程式將隨後自動關閉，請重新啟動。")
+            msg.setWindowTitle("原廠預設 (Reset to Default)")
+            msg.setText("⚠️ 此操作將清除所有設定、歷史紀錄與集群快取！")
+            msg.setInformativeText("系統即將重置並自動重新啟動。\n\nSystem will reset and restart automatically.")
             msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             msg.setDefaultButton(QMessageBox.No)
             msg.setIcon(QMessageBox.Warning)
@@ -4676,75 +4593,93 @@ class ModernTranscoderUI(QMainWindow):
         
         debug_log("Factory Reset initiated.")
         
-        # [NEW] Aggressive Cleanup: Wipe Cluster Sync Data before losing the path
+        # 1. Shutdown Logging early to release debug.log
+        import logging
         try:
-            current_cluster_path = self.settings.get("cluster_path")
-            if current_cluster_path and os.path.exists(current_cluster_path):
-                debug_log(f"Factory Reset: Wiping cluster path {current_cluster_path}")
+            logging.shutdown()
+            for h in logging.root.handlers[:]:
+                h.close()
+                logging.root.removeHandler(h)
+        except: pass
+
+        # 2. Aggressive Cleanup: Wipe Cluster Sync Data
+        try:
+            # Try getting current cluster path
+            c_path = self.settings.get("cluster_path")
+            if c_path and os.path.exists(c_path):
+                debug_log(f"Factory Reset: Wiping cluster path {c_path}")
                 import shutil
                 for sub in ["tasks", "nodes", "master.lock", "watch_config.json"]:
-                    p = os.path.join(current_cluster_path, sub)
+                    p = os.path.join(c_path, sub)
                     if os.path.exists(p):
                         if os.path.isdir(p): shutil.rmtree(p, ignore_errors=True)
                         else: os.remove(p)
+            
+            # Also check internal cluster_mgr path if it differs (e.g. placeholder)
+            if hasattr(self, 'cluster_mgr'):
+                cm_path = getattr(self.cluster_mgr, '_cluster_path', '')
+                if cm_path and cm_path != c_path and os.path.exists(cm_path):
+                    for sub in ["tasks", "nodes", "master.lock", "watch_config.json"]:
+                        p = os.path.join(cm_path, sub)
+                        if os.path.exists(p):
+                            try:
+                                if os.path.isdir(p): shutil.rmtree(p, ignore_errors=True)
+                                else: os.remove(p)
+                            except: pass
         except Exception as e:
             debug_log(f"Factory Reset: Cluster cleanup error - {e}")
              
-        # [Logic D] Definitive Cleanup: wipe all local history/logs using unified absolute paths
-        for local_file in ["watch_folder_history.json", "cleared_tasks.json", "debug.log"]:
-            lf = get_app_path(local_file)
-            if os.path.exists(lf):
-                try: 
-                    os.remove(lf)
-                    debug_log(f"Factory Reset: Deleted {lf}")
-                except: pass
-        
-        # [NEW] Clear entire logs directory if it exists
-        logs_dir = get_app_path("logs")
-        if os.path.exists(logs_dir):
-            shutil.rmtree(logs_dir, ignore_errors=True)
-            debug_log("Factory Reset: Wiped logs directory.")
-        
-        # [NEW] Wipe settings.json (Universal reset to clean state)
-        from core.settings import SETTINGS_FILE
-        if os.path.exists(SETTINGS_FILE):
+        # 3. Local Data Directory Cleanup
+        from core.settings import DATA_DIR, BASE_DIR, SETTINGS_FILE, CURRENT_VERSION
+        if os.path.exists(DATA_DIR):
+            import shutil
             try:
-                os.remove(SETTINGS_FILE)
-                debug_log("Factory Reset: Wiped settings.json.")
+                for filename in os.listdir(DATA_DIR):
+                    file_path = os.path.join(DATA_DIR, filename)
+                    try:
+                        if os.path.isfile(file_path): os.unlink(file_path)
+                        elif os.path.isdir(file_path): shutil.rmtree(file_path, ignore_errors=True)
+                    except: pass
             except: pass
 
-        # 1. Clear Settings File but RETAIN version to break the loop
-        # If we just delete it, next run is "NEW_INSTALL" and asks again.
-        from core.settings import SETTINGS_FILE, CURRENT_VERSION
-        CURRENT_VERSION = "v27.10.39" # This line is added based on the instruction
+        # 4. Root Legacy File Cleanup
+        legacy_files = [
+            "watch_folder_history.json", "processed_files.json", 
+            "settings.json", "debug.log", "cleared_tasks.json", "watch_config.json"
+        ]
+        for f in legacy_files:
+            p = os.path.join(BASE_DIR, f)
+            if os.path.exists(p):
+                try: os.remove(p)
+                except: pass
+
+        # 5. Stamp clean settings.json with correct version to avoid immediate prompt
         try:
-            # Instead of deleting, we overwrite with a clean, stamped version
             import json
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump({"app_version": CURRENT_VERSION}, f, indent=4)
             debug_log(f"Factory Reset: Overwrote settings with stamped version {CURRENT_VERSION}")
-        except Exception as e:
-            debug_log(f"Factory Reset: Failed to overwrite settings: {e}")
-            # Fallback to delete if overwrite fails
-            if os.path.exists(SETTINGS_FILE):
-                try: os.remove(SETTINGS_FILE)
-                except: pass
+        except: pass
+
+        # 6. Nuclear Restart (Silent & Purified)
+        # [v27.10.67] Direct Restart logic. No visible window, no brittle PING.
+        # We rely on main.py's 5s Mutex retry loop for the handover.
+        import subprocess
         
-        # [FIX] Don't clear in-memory settings - keep the version stamp
-        # Only clear if we're not in a version upgrade reset flow
-        # self.settings.settings = {}  # REMOVED - causes double prompt
+        # Purification: Remove PyInstaller env vars to prevent DLL load failures
+        restart_env = os.environ.copy()
+        if "_MEIPASS" in restart_env:
+            del restart_env["_MEIPASS"]
         
-        # [NEW] Relaunch Application automatically before quitting
-        debug_log("Factory Reset: Restarting application...")
-        from PySide6.QtCore import QProcess
-        import sys
-        
-        # Start detached process with same arguments
-        QProcess.startDetached(sys.executable, sys.argv)
-        
-        # [FIX] Use proper Qt cleanup to allow PyInstaller temp directory cleanup
-        debug_log("Factory Reset: Initiating graceful shutdown...")
-        QTimer.singleShot(500, lambda: QApplication.quit())
+        # Launching with DETACHED_PROCESS (0x8) ensures it persists but isn't a direct child
+        if getattr(sys, 'frozen', False):
+            subprocess.Popen([sys.executable], env=restart_env, creationflags=0x00000008)
+        else:
+            # sys.argv[0] is typically the script path
+            subprocess.Popen([sys.executable] + sys.argv, env=restart_env, creationflags=0x00000008)
+
+        # Suicide immediately to release Mutex instantly
+        os._exit(0)
 
     def update_cluster_activity(self):
         """Unified method to report current node activity to cluster."""
