@@ -4588,17 +4588,40 @@ class ModernTranscoderUI(QMainWindow):
 
         # Worker Output Path
         self.settings.set("worker_output_path", self.edit_worker_out.text())
-        
-        # Role Logic [AUTO-DISCOVERY]
-        # We no longer change role from UI. Role is managed by ClusterManager.
-        # old_role = self.settings.get("cluster_role", "Master")
-        # new_role = "Master" if self.combo_role.currentIndex() == 0 else "Worker"
-        # self.settings.set("cluster_role", new_role)
-        
-        # Determine effective role for logic below
-        current_role = self.settings.get("cluster_role", "Worker")
+
+        # [FIX v27.10.58] Save Node Alias - was missing from this function!
+        new_alias = self.edit_node_alias.text().strip()
+        self.settings.set("worker_alias", new_alias)
         
         self.save_settings()
+
+        # [NEW v27.10.58] Immediately push new alias to cluster heartbeat file
+        if hasattr(self, 'cluster_mgr') and new_alias:
+            try:
+                node_id = self.cluster_mgr.node_id
+                self.node_aliases[node_id] = new_alias  # Local map update
+                # Push new alias into worker thread settings for next heartbeat
+                self.cluster_mgr.update_worker_settings({"worker_alias": new_alias})
+                # Retroactively refresh all task widgets on this node
+                def _refresh(lw):
+                    for i in range(lw.count()):
+                        item = lw.item(i)
+                        w = lw.itemWidget(item)
+                        if not w: continue
+                        td = getattr(w, 'task_data', None)
+                        if not td: continue
+                        wid = td.get("worker_id", "") or ""
+                        wuuid = td.get("worker_uuid", "") or ""
+                        if wid == node_id or wuuid == node_id:
+                            w.lbl_node.setText(new_alias)
+                            w.lbl_node.setToolTip(f"{new_alias}\n({node_id})")
+                _refresh(self.manual_task_list)
+                _refresh(self.auto_task_list)
+                debug_log(f"[v27.10.58] Alias instantly applied: {new_alias} for node {node_id}")
+            except Exception as ae:
+                debug_log(f"Alias instant update error: {ae}")
+
+        
         
         # Apply Logic: If Worker, stop watch engine
         # Apply Logic based on CURRENT detected role
