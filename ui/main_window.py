@@ -697,15 +697,19 @@ class TaskProgressWidget(QWidget):
         self.lbl_node.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(self.lbl_node)
 
-        # 8. Progress
+        # 8. Progress - stacked container for in-progress bar + done label
+        prog_w = self.WIDTHS["prog"]
+        prog_container = QWidget()
+        prog_container.setFixedWidth(prog_w)
+        prog_container.setFixedHeight(26)
+        prog_stack = QHBoxLayout(prog_container)
+        prog_stack.setContentsMargins(0, 0, 0, 0)
+        prog_stack.setSpacing(0)
+
         self.progress = QProgressBar()
-        self.progress.setFixedWidth(self.WIDTHS["prog"])
-        self.progress.setMinimumWidth(self.WIDTHS["prog"])  # [v27.10.52] Double-lock width
-        self.progress.setMaximumWidth(self.WIDTHS["prog"])
+        self.progress.setFixedWidth(prog_w)
+        self.progress.setFixedHeight(26)
         self.progress.setTextVisible(True)
-        # [v27.10.53] CRITICAL: Apply Fusion style to bypass Qt Windows native style
-        # Windows native style ignores CSS margin on ::chunk causing 1-2px gap at 100%
-        # Fusion style fully respects QSS, guaranteeing pixel-perfect fill
         self.progress.setStyle(QStyleFactory.create("Fusion"))
         self.progress.setStyleSheet("""
             QProgressBar {
@@ -715,7 +719,21 @@ class TaskProgressWidget(QWidget):
             }
             QProgressBar::chunk { background-color: #2e7d32; border-radius: 0px; margin: 0px; }
         """)
-        layout.addWidget(self.progress)
+        prog_stack.addWidget(self.progress)
+
+        # [v27.10.54] DONE BAR - solid QLabel, 100% pixel-perfect fill, no Qt rendering quirks
+        self.lbl_done_bar = QLabel("100%")
+        self.lbl_done_bar.setFixedWidth(prog_w)
+        self.lbl_done_bar.setFixedHeight(26)
+        self.lbl_done_bar.setAlignment(Qt.AlignCenter)
+        self.lbl_done_bar.setStyleSheet(
+            "background-color: #2e7d32; color: white; font-size: 11px; font-weight: bold; border: none;"
+        )
+        self.lbl_done_bar.hide()  # hidden until task is done
+        prog_stack.addWidget(self.lbl_done_bar)
+
+        layout.addWidget(prog_container)
+
 
         # 9. Finished Time
         self.lbl_fin_time = QLabel("-")
@@ -813,19 +831,13 @@ class TaskProgressWidget(QWidget):
         # [v27.10.51] Always green for Done - unify red/green confusion
         self.lbl_status.setStyleSheet("color: #4CAF50; font-weight: bold; border: none;")
         self.lbl_perf.setText(speed_text)
-        self.progress.setRange(0, 100) # Ensure range is fixed
-        self.progress.setValue(100)    # Force 100%
-        self.progress.setFormat("100%")
-        # [v27.10.53] Done state - dark green bg, Fusion style for proper fill
-        self.progress.setStyle(QStyleFactory.create("Fusion"))
-        self.progress.setStyleSheet("""
-            QProgressBar {
-                background-color: #1a3a1a; border: none; border-radius: 0px;
-                height: 26px; max-height: 26px;
-                text-align: center; color: white; font-size: 11px; font-weight: bold;
-            }
-            QProgressBar::chunk { background-color: #2e7d32; border-radius: 0px; margin: 0px; }
-        """)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(100)
+        # [v27.10.54] Switch to solid done bar - bypass ALL Qt progress bar rendering issues
+        self.progress.hide()
+        if hasattr(self, 'lbl_done_bar'):
+            self.lbl_done_bar.show()
+
         
         # [FIX] Use real file modification time if available
         try:
@@ -2171,7 +2183,7 @@ class ModernTranscoderUI(QMainWindow):
         btn_browse_worker_out = QPushButton("瀏覽 (Browse)")
         btn_browse_worker_out.clicked.connect(self.browse_worker_output_path)
         worker_out_layout.addWidget(btn_browse_worker_out)
-        s_form.addLayout(worker_out_layout, 2, 1)
+        s_form.addLayout(worker_out_layout, 3, 1)
         
         btn_save_s = QPushButton("儲存設定 (Save)")
         btn_save_s.setFixedHeight(40)
