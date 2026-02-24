@@ -109,7 +109,7 @@ class TranscodeWorker(QThread):
             debug_log(f"Worker Exception: {e}")
             err_msg = str(e)
             if "WinError 2" in err_msg:
-                 err_msg += "\n\n[系統?��??��?定�?檔�?]\n?�表�?Worker ?�腦上缺�?FFmpeg ?��?檔。\n請�?試�? ffmpeg.exe 複製?��?式�?一?��?下�? core 資�?夾中??
+                 err_msg += "\n\n[系統找不到指定的檔案]\n這表示 Worker 電腦上缺少 FFmpeg 執行檔。\n請嘗試將 ffmpeg.exe 複製到程式同一目錄下的 core 資料夾中。"
             self.finished_signal.emit(False, err_msg)
 
     def kill(self):
@@ -271,7 +271,7 @@ class SmartFailureDialog(QDialog):
     """Professional dialog to translate technical errors into actionable solutions."""
     def __init__(self, technical_log, user_suggestion, fix_params=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("?�能轉碼診斷 (Smart Diagnosis)")
+        self.setWindowTitle("智能轉碼診斷 (Smart Diagnosis)")
         self.setMinimumSize(600, 450) # Resizable and larger minimum
         self.setSizeGripEnabled(True)
         self.setStyleSheet("background-color: #1e1e1e; color: #e0e0e0;")
@@ -283,7 +283,7 @@ class SmartFailureDialog(QDialog):
         layout.setSpacing(15)
 
         # Header
-        header = QLabel("?�� ?�能?��?建議 (Smart Suggestion)")
+        header = QLabel("💡 智能分析建議 (Smart Suggestion)")
         header.setStyleSheet("font-size: 18px; font-weight: bold; color: #40C4FF;")
         layout.addWidget(header)
 
@@ -294,7 +294,7 @@ class SmartFailureDialog(QDialog):
         layout.addWidget(self.lbl_suggestion)
 
         # Tech Details (Collapsed by default)
-        self.details_btn = QPushButton("??顯示?�術詳??(Technical Details)")
+        self.details_btn = QPushButton("▶ 顯示技術詳情 (Technical Details)")
         self.details_btn.setCheckable(True)
         self.details_btn.setStyleSheet("text-align: left; background: transparent; border: none; color: #888; padding: 5px;")
         layout.addWidget(self.details_btn)
@@ -314,12 +314,12 @@ class SmartFailureDialog(QDialog):
 
         # Action Buttons
         btns = QHBoxLayout()
-        self.btn_cancel = QPushButton("?��? (Cancel)")
+        self.btn_cancel = QPushButton("取消 (Cancel)")
         self.btn_cancel.setFixedSize(120, 36)
         self.btn_cancel.setStyleSheet("QPushButton { background: #444; border-radius: 4px; color: white; } QPushButton:hover { background: #555; }")
         self.btn_cancel.clicked.connect(self.reject)
 
-        self.btn_retry = QPushButton("套用修復並�?�?(Apply & Retry)")
+        self.btn_retry = QPushButton("套用修復並重試 (Apply & Retry)")
         self.btn_retry.setFixedSize(180, 36)
         if fix_params:
             self.btn_retry.setStyleSheet("QPushButton { background: #1976d2; color: white; font-weight: bold; border-radius: 4px; } QPushButton:hover { background: #1e88e5; }")
@@ -344,13 +344,13 @@ class SmartFailureDialog(QDialog):
 class PresetSelectorDialog(QDialog):
     def __init__(self, parent=None, initial_selection=None):
         super().__init__(parent)
-        self.setWindowTitle("?��???��轉碼?��??��?")
+        self.setWindowTitle("選擇監控轉碼目標格式")
         self.setMinimumSize(450, 600)
         self.selected_preset = None
         
         layout = QVBoxLayout(self)
         
-        title = QLabel("請選?�該資�?夾�??��??��?:")
+        title = QLabel("請選擇該資料夾對應的格式:")
         title.setStyleSheet("font-weight: bold; font-size: 14px; margin-bottom: 5px;")
         layout.addWidget(title)
         
@@ -374,17 +374,17 @@ class PresetSelectorDialog(QDialog):
         
         # Search Box
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("快速�?尋格�?..")
+        self.search_edit.setPlaceholderText("快速搜尋格式...")
         self.search_edit.textChanged.connect(self.filter_list)
         layout.addWidget(self.search_edit)
         
         btn_layout = QHBoxLayout()
-        btn_ok = QPushButton("確�??��? (OK)")
+        btn_ok = QPushButton("確認選擇 (OK)")
         btn_ok.setMinimumHeight(40)
         btn_ok.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold;")
         btn_ok.clicked.connect(self.accept)
         
-        btn_cancel = QPushButton("?��? (Cancel)")
+        btn_cancel = QPushButton("取消 (Cancel)")
         btn_cancel.setMinimumHeight(40)
         btn_cancel.clicked.connect(self.reject)
         
@@ -416,7 +416,7 @@ class WatchFolderRowWidget(QWidget):
         
         # Info Column
         info_layout = QVBoxLayout()
-        name_lbl = QLabel(f"?? {folder_data.get('name')}")
+        name_lbl = QLabel(f"📁 {folder_data.get('name')}")
         name_lbl.setStyleSheet("font-weight: bold; color: #E0E0E0; font-size: 14px;")
         path_lbl = QLabel(f"{folder_data.get('path')}")
         path_lbl.setStyleSheet("color: #888; font-size: 11px;")
@@ -431,7 +431,7 @@ class WatchFolderRowWidget(QWidget):
         # Status & Control
         self.is_enabled = folder_data.get("enabled", True)
         
-        status_text = "??���?(Active)" if self.is_enabled else "已�?�?(Stopped)"
+        status_text = "監控中 (Active)" if self.is_enabled else "已停止 (Stopped)"
         status_color = "#4CAF50" if self.is_enabled else "#757575"
         self.lbl_status = QLabel(status_text)
         self.lbl_status.setStyleSheet(f"color: {status_color}; font-weight: bold; font-size: 12px; margin-right: 15px;")
@@ -443,11 +443,11 @@ class WatchFolderRowWidget(QWidget):
         
         if self.is_enabled:
             self.btn_toggle.setIcon(self.controller.create_geometric_icon("stop", "#ffffff", size=32))
-            self.btn_toggle.setToolTip("?�止??�� (Stop)")
+            self.btn_toggle.setToolTip("停止監控 (Stop)")
             self.btn_toggle.setStyleSheet("QToolButton { background-color: #c62828; border: none; border-radius: 8px; } QToolButton:hover { background-color: #d32f2f; }")
         else:
             self.btn_toggle.setIcon(self.controller.create_geometric_icon("play", "#ffffff", size=32))
-            self.btn_toggle.setToolTip("?��???�� (Start)")
+            self.btn_toggle.setToolTip("啟動監控 (Start)")
             self.btn_toggle.setStyleSheet("QToolButton { background-color: #2e7d32; border: none; border-radius: 8px; } QToolButton:hover { background-color: #388e3c; }")
         
         self.btn_toggle.setIconSize(QSize(28, 28)) # Calibrated icon size
@@ -462,7 +462,7 @@ class WatchFolderRowWidget(QWidget):
         self.btn_edit.setCursor(Qt.PointingHandCursor)
         self.btn_edit.setIcon(self.controller.create_geometric_icon("edit", "#ffffff", size=32))
         self.btn_edit.setIconSize(QSize(28, 28))
-        self.btn_edit.setToolTip("編輯設�? (Edit)")
+        self.btn_edit.setToolTip("編輯設定 (Edit)")
         self.btn_edit.setStyleSheet("QToolButton { background-color: #1976D2; border: none; border-radius: 8px; } QToolButton:hover { background-color: #2196F3; }")
         self.btn_edit.clicked.connect(lambda idx=self.index: self.controller.edit_watch_folder(idx))
         layout.addWidget(self.btn_edit)
@@ -473,7 +473,7 @@ class WatchFolderRowWidget(QWidget):
         self.btn_del.setCursor(Qt.PointingHandCursor)
         self.btn_del.setIcon(self.controller.create_geometric_icon("delete", "#ffffff", size=32))
         self.btn_del.setIconSize(QSize(28, 28))
-        self.btn_del.setToolTip("?�除??�� (Delete)")
+        self.btn_del.setToolTip("刪除監控 (Delete)")
         self.btn_del.setStyleSheet("QToolButton { background-color: #c62828; border: none; border-radius: 8px; } QToolButton:hover { background-color: #d32f2f; }")
         self.btn_del.clicked.connect(lambda idx=self.index: self.controller.delete_watch_folder(idx))
         layout.addWidget(self.btn_del)
@@ -508,7 +508,7 @@ class ClusterNodeRowWidget(QWidget):
         lbl_icon = QLabel()
         lbl_icon.setFixedSize(48, 48)
         lbl_icon.setAlignment(Qt.AlignCenter)
-        lbl_icon.setText("?���?)
+        lbl_icon.setText("🖥️")
         lbl_icon.setStyleSheet("font-size: 24px; background-color: #444; border-radius: 6px;")
         layout.addWidget(lbl_icon)
         
@@ -517,7 +517,7 @@ class ClusterNodeRowWidget(QWidget):
         info_layout.setSpacing(2)
         
         # ID & Role & Alias
-        role_map = {"Master": "主監?��?�?, "Worker": "工�?節�?}
+        role_map = {"Master": "主監控節點", "Worker": "工作節點"}
         role_str = role_map.get(data.get("role"), data.get("role", "Node"))
         alias = data.get("alias") or node_id
         lbl_title = QLabel(f"{alias} ({role_str})")
@@ -528,7 +528,7 @@ class ClusterNodeRowWidget(QWidget):
         # IP & Status
         status = data.get("status", "Unknown")
         status_color = "#4CAF50" if status == "Online" or status == "Online (Local)" else "#F44336"
-        self.lbl_meta = QLabel(f"<span style='color:{status_color}'>??{status}</span>  |  IP: {data.get('ip', '-')}")
+        self.lbl_meta = QLabel(f"<span style='color:{status_color}'>● {status}</span>  |  IP: {data.get('ip', '-')}")
         self.lbl_meta.setStyleSheet("font-size: 11px; color: #aaa;")
         info_layout.addWidget(self.lbl_meta)
         
@@ -542,7 +542,7 @@ class ClusterNodeRowWidget(QWidget):
         
         # [NEW] Active Task Count
         task_count = data.get("active_task_count", 0)
-        self.lbl_tasks = QLabel(f"?�� Active Tasks: {task_count}")
+        self.lbl_tasks = QLabel(f"🔥 Active Tasks: {task_count}")
         self.lbl_tasks.setStyleSheet("color: #FF9800; font-weight: bold; font-size: 11px;")
         info_layout.addWidget(self.lbl_tasks)
 
@@ -600,7 +600,7 @@ class ClusterNodeRowWidget(QWidget):
     def update_state(self, data):
         # Update Alias/Title
         alias = data.get("alias") or self.node_id
-        role_map = {"Master": "主監?��?�?, "Worker": "工�?節�?}
+        role_map = {"Master": "主監控節點", "Worker": "工作節點"}
         role_str = role_map.get(data.get("role"), data.get("role", "Node"))
         if hasattr(self, 'lbl_title'):
              self.lbl_title.setText(f"{alias} ({role_str})")
@@ -608,7 +608,7 @@ class ClusterNodeRowWidget(QWidget):
         # Update Status/IP
         status = data.get("status", "Unknown")
         status_color = "#4CAF50" if status == "Online" or status == "Online (Local)" else "#F44336"
-        self.lbl_meta.setText(f"<span style='color:{status_color}'>??{status}</span>  |  IP: {data.get('ip', '-')}")
+        self.lbl_meta.setText(f"<span style='color:{status_color}'>● {status}</span>  |  IP: {data.get('ip', '-')}")
         
         # Update Activity
         activity = data.get("current_activity", "Idle")
@@ -618,7 +618,7 @@ class ClusterNodeRowWidget(QWidget):
         
         # Update Task Count
         task_count = data.get("active_task_count", 0)
-        self.lbl_tasks.setText(f"?�� Active Tasks: {task_count}")
+        self.lbl_tasks.setText(f"🔥 Active Tasks: {task_count}")
 
         
         # Update Resources
@@ -827,7 +827,7 @@ class TaskProgressWidget(QWidget):
         self.output_path = out_path
         
         # UI Updates
-        self.lbl_status.setText("完�? (Done)")
+        self.lbl_status.setText("完成 (Done)")
         # [v27.10.51] Always green for Done - unify red/green confusion
         self.lbl_status.setStyleSheet("color: #4CAF50; font-weight: bold; border: none;")
         self.lbl_perf.setText(speed_text)
@@ -855,7 +855,7 @@ class TaskProgressWidget(QWidget):
         # Icon/Buttons - SWAPPED per User Request
         # 1. Main Button (Left) -> REFRESH / RE-TRANSCODE
         self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24))
-        self.btn_transcode.setToolTip("?�新轉碼 (Re-Transcode)")
+        self.btn_transcode.setToolTip("重新轉碼 (Re-Transcode)")
         # Disconnect old signal and connect toggle_transcode (which restarts)
         try: self.btn_transcode.clicked.disconnect() 
         except: pass
@@ -864,7 +864,7 @@ class TaskProgressWidget(QWidget):
         # 2. Secondary Button (Right) -> PLAY (Green Triangle)
         self.btn_play_result.show()
         self.btn_play_result.setIcon(self.create_geometric_icon("play", "#4caf50", size=24)) # Green Play 
-        self.btn_play_result.setToolTip("?�放結�? (Play Result)")
+        self.btn_play_result.setToolTip("播放結果 (Play Result)")
         # Allow it to look like a play button
         self.btn_play_result.setStyleSheet("QToolButton { background-color: transparent; border: 1px solid #4caf50; border-radius: 4px; } QToolButton:hover { background-color: #1b5e20; }")
         
@@ -878,7 +878,7 @@ class TaskProgressWidget(QWidget):
         self.btn_cancel.setFixedSize(30, 30)
         self.btn_cancel.setIconSize(QSize(24, 24))
         self.btn_cancel.setIcon(self.create_geometric_icon("close", "#ffffff", size=24))
-        self.btn_cancel.setToolTip("移除任�? (Remove)")
+        self.btn_cancel.setToolTip("移除任務 (Remove)")
         self.btn_cancel.setStyleSheet(self.get_btn_style("filled_close"))
 
     def get_btn_style(self, variant="transparent"):
@@ -958,11 +958,10 @@ class TaskProgressWidget(QWidget):
         worker_id = task.get("worker_id", "-")
         worker_uuid = task.get("worker_uuid", worker_id)
 
-        # [v27.10.56] Show alias: prefer cluster _known_nodes alias, then task_data alias, then worker_id
+        # [v27.10.56] Show alias: prefer _known_nodes alias, then task_data alias, then worker_id
         display_node = worker_id
-        alias = task.get("worker_alias", "") or ""  # may be stored in task_data
+        alias = task.get("worker_alias", "") or ""
         if not alias:
-            # Look up from live known_nodes (cluster heartbeat)
             try:
                 parent = self.parent()
                 while parent and not hasattr(parent, 'cluster_mgr'):
@@ -979,13 +978,12 @@ class TaskProgressWidget(QWidget):
             display_node = worker_id[:12] + "..."
 
         self.lbl_node.setText(display_node)
-        tooltip = f"節�? {worker_id}"
+        tooltip = f"節點: {worker_id}"
         if alias and alias != worker_id:
             tooltip = f"{alias}\n({worker_id})"
         if worker_uuid != worker_id:
             tooltip += f"\n(ID: {worker_uuid})"
         self.lbl_node.setToolTip(tooltip)
-
 
         # [NEW/RESTORED] Populate Finish Time and Target Path
         fin_time = task.get("finish_time", "-")
@@ -1003,7 +1001,7 @@ class TaskProgressWidget(QWidget):
         # So we ensure it is hidden here
         self.btn_play_result.hide() 
         self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=20)) # Reset to Refresh icon for re-run
-        self.btn_transcode.setToolTip("?��?任�?轉碼 (Start Transcode)") # Reset to initial state
+        self.btn_transcode.setToolTip("當前任務轉碼 (Start Transcode)") # Reset to initial state
         self.state = "pending" # FIX: Set to pending, NOT done
 
 
@@ -1017,7 +1015,7 @@ class TaskProgressWidget(QWidget):
             # User said: "Recover original... don't become Play style".
             # Original was #E0E0E0 Refresh.
             self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24)) 
-            self.btn_transcode.setToolTip("繼�?轉碼 (Resume)")
+            self.btn_transcode.setToolTip("繼續轉碼 (Resume)")
             self.lbl_status.setText("Paused")
             self.lbl_status.setStyleSheet("color: #FFC107;")
             
@@ -1026,7 +1024,7 @@ class TaskProgressWidget(QWidget):
             self.resume_requested.emit(self)
             self.state = 'running'
             self.btn_transcode.setIcon(self.create_geometric_icon("pause", "#40C4FF", size=24))
-            self.btn_transcode.setToolTip("?��?轉碼 (Pause)")
+            self.btn_transcode.setToolTip("暫停轉碼 (Pause)")
             self.lbl_status.setText("Transcoding...")
             self.lbl_status.setStyleSheet("color: #4CAF50;")
             
@@ -1043,12 +1041,12 @@ class TaskProgressWidget(QWidget):
         self.lbl_status.setText("Transcoding...")
         self.lbl_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
         self.btn_transcode.setIcon(self.create_geometric_icon("pause", "#40C4FF", size=24)) 
-        self.btn_transcode.setToolTip("?��?轉碼 (Pause)")
+        self.btn_transcode.setToolTip("暫停轉碼 (Pause)")
         
         # Change Cancel to Stop Style (Larger Icon)
         self.btn_cancel.setIconSize(QSize(28, 28)) 
         self.btn_cancel.setIcon(self.create_geometric_icon("stop", "#ffffff", size=28)) 
-        self.btn_cancel.setToolTip("?�止轉碼 (Stop)")
+        self.btn_cancel.setToolTip("停止轉碼 (Stop)")
         self.btn_cancel.setStyleSheet(self.get_btn_style("filled_close")) 
 
     def request_stop_or_remove(self):
@@ -1057,11 +1055,11 @@ class TaskProgressWidget(QWidget):
         if state in ['running', 'paused']:
             # Confirm Stop
             box = QMessageBox(self)
-            box.setWindowTitle("?�止轉碼?")
-            box.setText("確�?要�?止目?��?轉碼任�??��?\n(?�度將歸??")
-            btn_stop = box.addButton("?�止 (Stop)", QMessageBox.YesRole)
+            box.setWindowTitle("停止轉碼?")
+            box.setText("確定要終止目前的轉碼任務嗎？\n(進度將歸零)")
+            btn_stop = box.addButton("停止 (Stop)", QMessageBox.YesRole)
             btn_force = box.addButton("強制移除 (Force Remove)", QMessageBox.DestructiveRole)
-            btn_cancel = box.addButton("?��? (Cancel)", QMessageBox.RejectRole)
+            btn_cancel = box.addButton("取消 (Cancel)", QMessageBox.RejectRole)
             
             box.exec()
             
@@ -1100,12 +1098,12 @@ class TaskProgressWidget(QWidget):
         self.btn_cancel.setFixedSize(30, 30)
         self.btn_cancel.setIconSize(QSize(24, 24))
         self.btn_cancel.setIcon(self.create_geometric_icon("close", "#ffffff", size=24)) 
-        self.btn_cancel.setToolTip("移除任�? (Remove)")
+        self.btn_cancel.setToolTip("移除任務 (Remove)")
         self.btn_cancel.setStyleSheet(self.get_btn_style("filled_close"))
         
         # Reset Transcode Button to Refresh (Original)
         self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=24))
-        self.btn_transcode.setToolTip("?�新轉碼 (Re-Transcode)")
+        self.btn_transcode.setToolTip("重新轉碼 (Re-Transcode)")
 
     def play_or_refresh(self):
         # Reset Style to "Seen" (Transparent)
@@ -1220,7 +1218,7 @@ class TaskProgressWidget(QWidget):
             except:
                 subprocess.Popen(f'explorer "{os.path.normpath(folder_path)}"')
         else:
-            QMessageBox.warning(None, "?�誤", f"?��??��??��?: {folder_path}")
+            QMessageBox.warning(None, "錯誤", f"無法開啟目錄: {folder_path}")
 
 
 
@@ -1502,10 +1500,10 @@ class ModernTranscoderUI(QMainWindow):
                     if len(display) > 40:
                         try:
                             head, tail = os.path.split(path)
-                            display = f"?? .../{os.path.basename(head)}/{tail}" if head else f"?? {display[-35:]}"
-                        except: display = f"?? {display[-35:]}"
+                            display = f"📁 .../{os.path.basename(head)}/{tail}" if head else f"📁 {display[-35:]}"
+                        except: display = f"📁 {display[-35:]}"
                     else:
-                        display = f"?? {display}"
+                        display = f"📁 {display}"
 
                     # Custom Widget
                     item_w = HistoryItemWidget(path, display)
@@ -1517,7 +1515,7 @@ class ModernTranscoderUI(QMainWindow):
                     self.menu_hist_source.addAction(action)
             
             self.menu_hist_source.addSeparator()
-            self.menu_hist_source.addAction("?�部清空 (Clear All)").triggered.connect(self.clear_source_history)
+            self.menu_hist_source.addAction("全部清空 (Clear All)").triggered.connect(self.clear_source_history)
 
 
 
@@ -1568,7 +1566,7 @@ class ModernTranscoderUI(QMainWindow):
                      print(f"DEBUG: Fixed Meta Probe -> Codec: {fixed_meta.get('codec') if fixed_meta else 'FAILED'}")
                      
                      if hasattr(self, 'statusBar'):
-                         self.statusBar().showMessage(f"已自?��??�修復�???(Codec: {fixed_meta.get('codec') if fixed_meta else '??'})", 3000)
+                         self.statusBar().showMessage(f"已自動載入修復版本 (Codec: {fixed_meta.get('codec') if fixed_meta else '??'})", 3000)
                      return fixed_path, fixed_meta if fixed_meta else meta
             return path, meta
             
@@ -1584,7 +1582,7 @@ class ModernTranscoderUI(QMainWindow):
     def open_history_manager(self):
         try:
             from ui.history_dialog import HistoryManagerDialog
-            dlg = HistoryManagerDialog(self.settings, "source_history", "管�?源�?歷史 (Manage Source History)", self)
+            dlg = HistoryManagerDialog(self.settings, "source_history", "管理源檔歷史 (Manage Source History)", self)
             dlg.exec()
             # Refresh menu after dialog closes
             self.update_history_menus()
@@ -1687,13 +1685,13 @@ class ModernTranscoderUI(QMainWindow):
         if self.settings.is_new_version():
             from PySide6.QtWidgets import QMessageBox
             msg = QMessageBox(self)
-            msg.setWindowTitle("?�本?�新確�? (Version Update)")
+            msg.setWindowTitle("版本更新確認 (Version Update)")
             old_v = self.settings.get('app_version', '0.0.0')
             new_v = "v27.10.38" # Corrected to direct assignment for display
-            msg.setText(f"?�測?�新?�本！系統已�?{old_v} ?�新??{new_v}??)
-            msg.setInformativeText("?��??�[?�新設置 (Factory Reset)] ?��?乾淨?��?，�???[載入?��??�設定]�?)
-            btn_load = msg.addButton("載入?�設�?(Keep Settings)", QMessageBox.AcceptRole)
-            btn_reset = msg.addButton("?�新設置 (Factory Reset)", QMessageBox.DestructiveRole) 
+            msg.setText(f"偵測到新版本！系統已從 {old_v} 更新至 {new_v}。")
+            msg.setInformativeText("您希望[重新設置 (Factory Reset)] 獲取乾淨環境，還是 [載入其餘舊設定]？")
+            btn_load = msg.addButton("載入舊設定 (Keep Settings)", QMessageBox.AcceptRole)
+            btn_reset = msg.addButton("重新設置 (Factory Reset)", QMessageBox.DestructiveRole) 
             msg.setDefaultButton(btn_load) # [FIX] Default to Keep Settings to avoid accidental wipes
             msg.setIcon(QMessageBox.Question)
             msg.setStyleSheet("QMessageBox { background-color: #2b2b2b; } QLabel { color: white; } QPushButton { min-width: 140px; padding: 5px; }")
@@ -1751,7 +1749,7 @@ class ModernTranscoderUI(QMainWindow):
             
             if not silent:
                 from PySide6.QtWidgets import QMessageBox
-                QMessageBox.information(self, "?�置完�?", "系統已�?置�?將�??��??��?)
+                QMessageBox.information(self, "重置完成", "系統已重置，將重新啟動。")
             
             # Restart
             # Determine executable for restart
@@ -1767,7 +1765,7 @@ class ModernTranscoderUI(QMainWindow):
             debug_log(f"Factory Reset Error: {e}")
             if not silent:
                 from PySide6.QtWidgets import QMessageBox
-                QMessageBox.warning(self, "Error", f"?�置失�?: {e}")
+                QMessageBox.warning(self, "Error", f"重置失敗: {e}")
 
     def update_dashboard_badge(self):
         """Adds a visual indicator to Dashboard button if background tasks exist."""
@@ -1787,10 +1785,10 @@ class ModernTranscoderUI(QMainWindow):
                         bg_tasks += 1
             
             if bg_tasks > 0:
-                self.btn_dash.setText(f"??  Dashboard ({bg_tasks})")
+                self.btn_dash.setText(f"📊  Dashboard ({bg_tasks})")
                 self.btn_dash.setStyleSheet("color: #ff5252; font-weight: bold;")
             else:
-                self.btn_dash.setText("??  Dashboard")
+                self.btn_dash.setText("📊  Dashboard")
                 self.btn_dash.setStyleSheet("")
         except: pass
 
@@ -1810,7 +1808,7 @@ class ModernTranscoderUI(QMainWindow):
             except: pass
             
         from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(self, "Settings Saved", "設�?已儲�?(Settings Saved)")
+        QMessageBox.information(self, "Settings Saved", "設定已儲存 (Settings Saved)")
 
     def save_settings(self):
         if getattr(self, 'loading', False) or getattr(self, '_reset_in_progress', False):
@@ -2038,17 +2036,17 @@ class ModernTranscoderUI(QMainWindow):
         sidebar_layout.setContentsMargins(0, 10, 0, 10)
         sidebar_layout.setSpacing(5)
         
-        self.btn_home = QPushButton("?�碼�?Transcoder")
+        self.btn_home = QPushButton("金碼湛 Transcoder")
         script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         base_path = sys._MEIPASS if hasattr(sys, '_MEIPASS') else script_dir
         logo_path = os.path.join(base_path, "assets", "logo.png")
         if os.path.exists(logo_path):
             self.btn_home.setIcon(QIcon(logo_path))
             self.btn_home.setIconSize(QSize(24, 24))
-        self.btn_dash = QPushButton("??  Dashboard")
-        self.btn_watch = QPushButton("??  Watch Folders")
-        self.btn_cluster = QPushButton("?��  Cluster Status")
-        self.btn_settings = QPushButton("?? Settings")
+        self.btn_dash = QPushButton("📊  Dashboard")
+        self.btn_watch = QPushButton("👀  Watch Folders")
+        self.btn_cluster = QPushButton("🖥  Cluster Status")
+        self.btn_settings = QPushButton("⚙  Settings")
         
         for btn in [self.btn_home, self.btn_dash, self.btn_watch, self.btn_cluster, self.btn_settings]:
             btn.setCheckable(True)
@@ -2074,12 +2072,12 @@ class ModernTranscoderUI(QMainWindow):
         # --- Page 1: Watch Folders ---
         self.watch_page = QWidget()
         w_layout = QVBoxLayout(self.watch_page)
-        w_title = QLabel("?? ??��資�?夾設�?(Watch Folder Settings)")
+        w_title = QLabel("📂 監控資料夾設定 (Watch Folder Settings)")
         w_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #4CAF50;")
         w_layout.addWidget(w_title)
 
         # Global Engine Status
-        self.lbl_watch_GlobalStatus = QLabel("?��?引�??�?? ?��?�?(Running)")
+        self.lbl_watch_GlobalStatus = QLabel("核心引擎狀態: 運行中 (Running)")
         self.lbl_watch_GlobalStatus.setStyleSheet("color: #666; font-size: 12px; margin-bottom: 10px;")
         w_layout.addWidget(self.lbl_watch_GlobalStatus)
         
@@ -2090,7 +2088,7 @@ class ModernTranscoderUI(QMainWindow):
             QListWidget::item:selected { background-color: transparent; }
         """)
         w_layout.addWidget(self.watch_list)
-        w_btn_add = QPushButton("添�???��路�? (Add Path)")
+        w_btn_add = QPushButton("添加監控路徑 (Add Path)")
         w_btn_add.clicked.connect(self.add_watch_folder_ui)
         w_layout.addWidget(w_btn_add)
         self.stack.addWidget(self.watch_page)
@@ -2098,16 +2096,16 @@ class ModernTranscoderUI(QMainWindow):
         # --- Page 2: Cluster Status ---
         self.cluster_page = QWidget()
         cl_layout = QVBoxLayout(self.cluster_page)
-        cl_title = QLabel("?�� ?�群節點�???(Cluster Nodes)")
+        cl_title = QLabel("🖥 集群節點狀態 (Cluster Nodes)")
         cl_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #BB86FC;")
         cl_layout.addWidget(cl_title)
 
         # [NEW] Role Selection
         role_frame = QFrame()
         role_layout = QHBoxLayout(role_frame)
-        role_layout.addWidget(QLabel("?�群?��?角色 (Cluster Role):"))
+        role_layout.addWidget(QLabel("集群運行角色 (Cluster Role):"))
         self.combo_role = QComboBox()
-        self.combo_role.addItems(["主監?��?�?(Master - Scans Folder)", "工�?計�?節�?(Worker - Just Transcode)"])
+        self.combo_role.addItems(["主監控節點 (Master - Scans Folder)", "工作計算節點 (Worker - Just Transcode)"])
         role_val = self.settings.get("cluster_role", "Master")
         self.combo_role.setCurrentIndex(0 if role_val == "Master" else 1)
         role_layout.addWidget(self.combo_role)
@@ -2122,7 +2120,7 @@ class ModernTranscoderUI(QMainWindow):
 
         self.node_list = QListWidget()
         cl_layout.addWidget(self.node_list, 1) # Expand
-        self.lbl_node_info = QLabel("?��?辨�?�?(Local Node): -")
+        self.lbl_node_info = QLabel("本機辨識碼 (Local Node): -")
         self.lbl_node_info.setStyleSheet("color: #888; font-family: monospace;")
         cl_layout.addWidget(self.lbl_node_info)
         self.stack.addWidget(self.cluster_page)
@@ -2155,25 +2153,25 @@ class ModernTranscoderUI(QMainWindow):
         # --- Page 3: Settings ---
         self.settings_page = QWidget()
         s_layout = QVBoxLayout(self.settings_page)
-        s_title = QLabel("???��?設�? (Global Settings)")
+        s_title = QLabel("⚙ 全局設定 (Global Settings)")
         s_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #757575;")
         s_layout.addWidget(s_title)
         
         s_form = QGridLayout()
         
         # 1. Cluster Path
-        s_form.addWidget(QLabel("?�群?�步路�? (Cluster Sync Path):"), 0, 0)
+        s_form.addWidget(QLabel("集群同步路徑 (Cluster Sync Path):"), 0, 0)
         cl_path_layout = QHBoxLayout()
         self.edit_cluster_path = QLineEdit()
         self.edit_cluster_path.setText(self.settings.get("cluster_path", ""))
         cl_path_layout.addWidget(self.edit_cluster_path)
-        btn_browse_cl = QPushButton("?�覽 (Browse)")
+        btn_browse_cl = QPushButton("瀏覽 (Browse)")
         btn_browse_cl.clicked.connect(self.browse_cluster_path)
         cl_path_layout.addWidget(btn_browse_cl)
         s_form.addLayout(cl_path_layout, 0, 1)
         
         # [NEW] Parallel Tasks Control
-        s_form.addWidget(QLabel("?�大�??��?碼數??(Max Parallel):"), 1, 0)
+        s_form.addWidget(QLabel("最大同時轉碼數量 (Max Parallel):"), 1, 0)
         parallel_layout = QHBoxLayout()
         self.spin_parallel = QSpinBox()
         self.spin_parallel.setRange(1, 16)
@@ -2181,31 +2179,31 @@ class ModernTranscoderUI(QMainWindow):
         self.spin_parallel.setValue(suggested)
         parallel_layout.addWidget(self.spin_parallel)
         
-        btn_suggest = QPushButton("硬�?建議 (Suggest)")
+        btn_suggest = QPushButton("硬體建議 (Suggest)")
         btn_suggest.clicked.connect(self.apply_recommended_concurrency)
         parallel_layout.addWidget(btn_suggest)
         s_form.addLayout(parallel_layout, 1, 1)
         
         # [NEW] Node Alias
-        s_form.addWidget(QLabel("節點�?�?(Node Alias):"), 2, 0)
+        s_form.addWidget(QLabel("節點名稱 (Node Alias):"), 2, 0)
         self.edit_node_alias = QLineEdit()
-        self.edit_node_alias.setPlaceholderText("例�?: MASTER-PC, WORKER-01")
+        self.edit_node_alias.setPlaceholderText("例如: MASTER-PC, WORKER-01")
         self.edit_node_alias.setText(self.settings.get("worker_alias", ""))
         s_form.addWidget(self.edit_node_alias, 2, 1)
 
         # [NEW] Worker Specific Output Path
-        s_form.addWidget(QLabel("??��任�?專用輸出路�? (Worker Output):"), 3, 0)
+        s_form.addWidget(QLabel("監控任務專用輸出路徑 (Worker Output):"), 3, 0)
         worker_out_layout = QHBoxLayout()
         self.edit_worker_out = QLineEdit()
-        self.edit_worker_out.setPlaceholderText("?�空?��?設�??��?檔目??(Default: Same as source)")
+        self.edit_worker_out.setPlaceholderText("留空則預設存於源檔目錄 (Default: Same as source)")
         self.edit_worker_out.setText(self.settings.get("worker_output_path", ""))
         worker_out_layout.addWidget(self.edit_worker_out)
-        btn_browse_worker_out = QPushButton("?�覽 (Browse)")
+        btn_browse_worker_out = QPushButton("瀏覽 (Browse)")
         btn_browse_worker_out.clicked.connect(self.browse_worker_output_path)
         worker_out_layout.addWidget(btn_browse_worker_out)
         s_form.addLayout(worker_out_layout, 3, 1)
         
-        btn_save_s = QPushButton("?��?設�? (Save)")
+        btn_save_s = QPushButton("儲存設定 (Save)")
         btn_save_s.setFixedHeight(40)
         btn_save_s.setIcon(self.create_geometric_icon("save", "#ffffff", size=32))
         btn_save_s.clicked.connect(self.save_global_settings_ui)
@@ -2213,7 +2211,7 @@ class ModernTranscoderUI(QMainWindow):
         
         # [NEW] Maintenance Actions
         maint_layout = QHBoxLayout()
-        btn_reset = QPushButton("?��? 工�??�置 (Factory Reset / Clear Cache)")
+        btn_reset = QPushButton("⚠️ 工廠重置 (Factory Reset / Clear Cache)")
         btn_reset.setStyleSheet("background-color: #631212; color: #ffcccc; border: 1px solid #821414;")
         btn_reset.clicked.connect(self.do_factory_reset)
         maint_layout.addWidget(btn_reset)
@@ -2231,19 +2229,19 @@ class ModernTranscoderUI(QMainWindow):
         
         # Title Row
         db_title_layout = QHBoxLayout()
-        db_title = QLabel("?? ?��??�監?�任?��???(Automated Task Queue)")
+        db_title = QLabel("📊 自動化監控任務隊列 (Automated Task Queue)")
         db_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #4CAF50;")
         db_title_layout.addWidget(db_title)
         db_title_layout.addStretch()
         
-        self.btn_clear_dash = QPushButton("??�?清除完�? (Clear)")
+        self.btn_clear_dash = QPushButton("🗑️ 清除完成 (Clear)")
         self.btn_clear_dash.setFixedWidth(110) # [v27.10.46] Compact
         self.btn_clear_dash.clicked.connect(self.clear_dashboard_finished)
         db_title_layout.addWidget(self.btn_clear_dash)
         self.dashboard_layout.addLayout(db_title_layout)
         
         # Active Queue Section
-        self.dashboard_layout.addWidget(QLabel("?��?中任??(Active Queue)"))
+        self.dashboard_layout.addWidget(QLabel("運行中任務 (Active Queue)"))
         
         # Header Row (Copied from manual list for consistency)
         db_header_frame = QFrame()
@@ -2257,16 +2255,16 @@ class ModernTranscoderUI(QMainWindow):
         dbh_layout.setSpacing(10)
 
         col_lbls = [
-            ("任�??�稱", TaskProgressWidget.WIDTHS["name"]), 
-            ("?�??, TaskProgressWidget.WIDTHS["status"]), 
-            ("?��?資�?", TaskProgressWidget.WIDTHS["fmt"]), 
-            ("轉碼起�?", TaskProgressWidget.WIDTHS["start"]), 
-            ("?�能", TaskProgressWidget.WIDTHS["perf"]), 
-            ("來�?", TaskProgressWidget.WIDTHS["src"]), 
-            ("節點別??, TaskProgressWidget.WIDTHS["node"]), 
-            ("?�度", TaskProgressWidget.WIDTHS["prog"]), 
-            ("完�??��?", TaskProgressWidget.WIDTHS["fin"]), 
-            ("?��?", TaskProgressWidget.WIDTHS["act"])
+            ("任務名稱", TaskProgressWidget.WIDTHS["name"]), 
+            ("狀態", TaskProgressWidget.WIDTHS["status"]), 
+            ("格式資訊", TaskProgressWidget.WIDTHS["fmt"]), 
+            ("轉碼起始", TaskProgressWidget.WIDTHS["start"]), 
+            ("效能", TaskProgressWidget.WIDTHS["perf"]), 
+            ("來源", TaskProgressWidget.WIDTHS["src"]), 
+            ("節點別名", TaskProgressWidget.WIDTHS["node"]), 
+            ("進度", TaskProgressWidget.WIDTHS["prog"]), 
+            ("完成時間", TaskProgressWidget.WIDTHS["fin"]), 
+            ("操作", TaskProgressWidget.WIDTHS["act"])
         ]
         for txt, w in col_lbls:
             l = QLabel(txt)
@@ -2286,7 +2284,7 @@ class ModernTranscoderUI(QMainWindow):
         self.dashboard_layout.addWidget(self.auto_task_list, 2)
         
         # History Section
-        self.dashboard_layout.addWidget(QLabel("??��記�? (History & Logs)"))
+        self.dashboard_layout.addWidget(QLabel("監控記錄 (History & Logs)"))
         self.dashboard_history_list = QListWidget()
         self.dashboard_history_list.setAlternatingRowColors(True)
         self.dashboard_history_list.setStyleSheet("""
@@ -2302,9 +2300,9 @@ class ModernTranscoderUI(QMainWindow):
         action_bar = QHBoxLayout()
         action_bar.setSpacing(10)
         
-        self.btn_large_add = QPushButton(" + 添�?任�? (Add to Queue)")
+        self.btn_large_add = QPushButton(" + 添加任務 (Add to Queue)")
         self.btn_large_add.setCursor(Qt.PointingHandCursor)
-        self.btn_large_add.setToolTip("將目?�設定�??��?�?(快速鍵: Enter)")
+        self.btn_large_add.setToolTip("將目前設定加入排程 (快速鍵: Enter)")
         self.btn_large_add.setFixedHeight(50) # Big Click Target
         self.btn_large_add.setStyleSheet("""
             QPushButton { 
@@ -2321,7 +2319,7 @@ class ModernTranscoderUI(QMainWindow):
         self.btn_large_add.clicked.connect(self.add_task_to_queue)
         
         # Global Start Button
-        self.btn_start_all = QPushButton("???��??�?��?�?(Start All)")
+        self.btn_start_all = QPushButton("⚡ 開始所有轉碼 (Start All)")
         self.btn_start_all.setFixedHeight(50) # Match height
         self.btn_start_all.setCursor(Qt.PointingHandCursor)
         self.btn_start_all.setStyleSheet("""
@@ -2374,7 +2372,7 @@ class ModernTranscoderUI(QMainWindow):
         self.btn_source.setIcon(self.style().standardIcon(QStyle.SP_DirHomeIcon))
         self.btn_source.setFixedSize(45, 45)
         self.btn_source.setIconSize(QSize(32, 32))
-        self.btn_source.setToolTip("載入源�? (Load Source)")
+        self.btn_source.setToolTip("載入源檔 (Load Source)")
         self.btn_source.setStyleSheet("""
             QToolButton { background-color: transparent; border: 1px solid #555; border-radius: 4px; }
             QToolButton:hover { background-color: #444; border-color: #777; }
@@ -2385,7 +2383,7 @@ class ModernTranscoderUI(QMainWindow):
         
         # 2. History Dropdown Button (Matching btn_hist_out style)
         self.btn_hist_source = QToolButton()
-        self.btn_hist_source.setText("??)
+        self.btn_hist_source.setText("▼")
         self.btn_hist_source.setPopupMode(QToolButton.InstantPopup)
         self.btn_hist_source.setFixedSize(25, 45)
         self.btn_hist_source.setStyleSheet("""
@@ -2400,7 +2398,7 @@ class ModernTranscoderUI(QMainWindow):
         self.btn_hist_source.setMenu(self.menu_hist_source)
         source_layout.addWidget(self.btn_hist_source)
         
-        self.lbl_source_path = QLabel("請�??��?�?(Please Load Source)")
+        self.lbl_source_path = QLabel("請載入源檔 (Please Load Source)")
         self.lbl_source_path.setWordWrap(True)
         self.lbl_source_path.setStyleSheet("""
             QLabel {
@@ -2428,7 +2426,7 @@ class ModernTranscoderUI(QMainWindow):
             }
         """
         
-        lbl_source_header = QLabel("源�?路�? (Source Path)")
+        lbl_source_header = QLabel("源檔路徑 (Source Path)")
         lbl_source_header.setStyleSheet(HEADER_STYLE)
         self.params_layout.addWidget(lbl_source_header)
         self.params_layout.addWidget(source_container)
@@ -2456,7 +2454,7 @@ class ModernTranscoderUI(QMainWindow):
         vcodec_layout.setSpacing(5)
         vcodec_layout.addWidget(self.lbl_vcodec)
         
-        self.btn_fix_codec = QPushButton("?�新�?�� (Re-Decode)")
+        self.btn_fix_codec = QPushButton("重新解碼 (Re-Decode)")
         self.btn_fix_codec.setCursor(Qt.PointingHandCursor)
         self.btn_fix_codec.setStyleSheet("background-color: #d32f2f; color: white; border-radius: 4px; padding: 2px 8px; font-weight: bold;")
         self.btn_fix_codec.hide()
@@ -2472,23 +2470,23 @@ class ModernTranscoderUI(QMainWindow):
         meta_layout.addWidget(self.lbl_acodec, 3, 0)
         meta_layout.addWidget(self.lbl_ach, 3, 1)
         
-        self.params_layout.addWidget(QLabel("影�?詳細資�? (Detail Info)"))
+        self.params_layout.addWidget(QLabel("影片詳細資訊 (Detail Info)"))
         self.params_layout.addWidget(meta_group)
         
         # Global Start Button - REMOVED from here, moved to below player
-        # self.btn_start_all = QPushButton("???��??�?��?�?(Start All)")
+        # self.btn_start_all = QPushButton("⚡ 開始所有轉碼 (Start All)")
         # ...
         
         # Playlist Controls
         pl_ctrl = QHBoxLayout()
-        lbl_pl_header = QLabel("源�??�表 (Source Files)")
+        lbl_pl_header = QLabel("源檔列表 (Source Files)")
         lbl_pl_header.setStyleSheet(HEADER_STYLE)
         pl_ctrl.addWidget(lbl_pl_header)
         pl_ctrl.addStretch()
         
         # Add All Button (Final Polish: Narrower, Maximized Icon, Tight Spacing)
         self.btn_add_all = QPushButton()
-        self.btn_add_all.setToolTip("添�??��??��??�未?��??�添?�全??(Add Selected or All)")
+        self.btn_add_all.setToolTip("添加選取項，若未選取則添加全部 (Add Selected or All)")
         self.btn_add_all.setFixedSize(105, 50) # Narrowed by ~1/4 (was 140)
         self.btn_add_all.setCursor(Qt.PointingHandCursor)
         self.btn_add_all.setStyleSheet("""
@@ -2526,7 +2524,7 @@ class ModernTranscoderUI(QMainWindow):
         # btn_add removed as per user request (Duplicate of Source Button)
         
         btn_clear = QToolButton()
-        btn_clear.setToolTip("清除?�?��???(Clear All Entries)")
+        btn_clear.setToolTip("清除所有條目 (Clear All Entries)")
         btn_clear.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
         btn_clear.setIconSize(QSize(24, 24))
         btn_clear.setMinimumWidth(80) # Text style maybe? Or keep icon. User said "All icons enlarge".
@@ -2582,11 +2580,11 @@ class ModernTranscoderUI(QMainWindow):
         
         # --- Target Settings ---
         target_header_layout = QHBoxLayout()
-        lbl_target = QLabel("?��??��?設置 (Target Settings)")
+        lbl_target = QLabel("目標格式設置 (Target Settings)")
         lbl_target.setStyleSheet(HEADER_STYLE)
         target_header_layout.addWidget(lbl_target)
         
-        btn_copy_source = QPushButton("複製源�??�數 (Copy Source)")
+        btn_copy_source = QPushButton("複製源檔參數 (Copy Source)")
         btn_copy_source.setMinimumWidth(200) # Flexible width
         btn_copy_source.setCursor(Qt.PointingHandCursor)
         btn_copy_source.setStyleSheet("""
@@ -2634,7 +2632,7 @@ class ModernTranscoderUI(QMainWindow):
         
         # Row 0: Presets
         preset_layout = QHBoxLayout()
-        preset_layout.addWidget(QLabel("?�設:"))
+        preset_layout.addWidget(QLabel("預設:"))
         self.combo_presets = QComboBox()
         self.combo_presets.addItem("Custom / Unsaved")
         self.combo_presets.setSizeAdjustPolicy(QComboBox.AdjustToContents)
@@ -2645,7 +2643,7 @@ class ModernTranscoderUI(QMainWindow):
         
         
         btn_save_preset = QToolButton()
-        btn_save_preset.setToolTip("?��? (Save)")
+        btn_save_preset.setToolTip("儲存 (Save)")
         btn_save_preset.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
         btn_save_preset.setFixedSize(45, 45)
         btn_save_preset.setIconSize(QSize(32, 32))
@@ -2658,7 +2656,7 @@ class ModernTranscoderUI(QMainWindow):
         preset_layout.addWidget(btn_save_preset)
         
         btn_del_preset = QToolButton()
-        btn_del_preset.setToolTip("?�除 (Delete)")
+        btn_del_preset.setToolTip("刪除 (Delete)")
         btn_del_preset.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
         btn_del_preset.setFixedSize(45, 45)
         btn_del_preset.setIconSize(QSize(32, 32))
@@ -2674,7 +2672,7 @@ class ModernTranscoderUI(QMainWindow):
         
         # Row 1: Container & Codec
         t_row1 = QHBoxLayout()
-        t_row1.addWidget(QLabel("封�?:"))
+        t_row1.addWidget(QLabel("封裝:"))
         self.combo_container = QComboBox()
         self.combo_container.addItems(["mp4", "mov", "mkv", "ts", "mxf"])
         self.combo_container.currentTextChanged.connect(self.save_settings)
@@ -2688,7 +2686,7 @@ class ModernTranscoderUI(QMainWindow):
         self.combo_vcodec.currentTextChanged.connect(self.save_settings)
         t_row1.addWidget(self.combo_vcodec, 1) # Fixed duplicate
         
-        t_row1.addWidget(QLabel(" ?��?:"))
+        t_row1.addWidget(QLabel(" 音訊:"))
         self.combo_acode = QComboBox()
         self.combo_acode.addItems(["aac", "pcm_s16le", "mp3", "copy"]) 
         self.combo_acode.currentTextChanged.connect(self.save_settings)
@@ -2698,7 +2696,7 @@ class ModernTranscoderUI(QMainWindow):
         
         # Row 1.5: FPS & TV System
         t_row15 = QHBoxLayout()
-        t_row15.addWidget(QLabel("幀??"))
+        t_row15.addWidget(QLabel("幀率:"))
         self.combo_fps = QComboBox()
         self.combo_fps.addItems(["", "23.976", "24", "25", "29.97", "30", "50", "59.94", "60"])
         self.combo_fps.setEditable(True)
@@ -2706,7 +2704,7 @@ class ModernTranscoderUI(QMainWindow):
         self.combo_fps.currentTextChanged.connect(self.save_settings)
         t_row15.addWidget(self.combo_fps)
         
-        t_row15.addWidget(QLabel(" ?��?:"))
+        t_row15.addWidget(QLabel(" 制式:"))
         self.combo_sys = QComboBox()
         self.combo_sys.addItems(["Auto", "NTSC", "PAL"])
         self.combo_sys.setFixedWidth(70)
@@ -2723,14 +2721,14 @@ class ModernTranscoderUI(QMainWindow):
         
         # Row 2: Bitrate & Audio Gain
         t_row2 = QHBoxLayout()
-        t_row2.addWidget(QLabel("碼�?:"))
+        t_row2.addWidget(QLabel("碼率:"))
         self.edit_bitrate = QLineEdit("5000") # Moved here
         self.edit_bitrate.setFixedWidth(60)
         self.edit_bitrate.textChanged.connect(self.save_settings)
         t_row2.addWidget(self.edit_bitrate)
         t_row2.addWidget(QLabel("k"))
         
-        t_row2.addWidget(QLabel(" 增�?:"))
+        t_row2.addWidget(QLabel(" 增益:"))
         
         # Auto Gain Button
         self.btn_auto_gain = QToolButton()
@@ -2747,7 +2745,7 @@ class ModernTranscoderUI(QMainWindow):
         
         # Manual SpinBox Implementation [ - ][ 0.0 ][ + ]
         self.btn_gain_less = QToolButton()
-        self.btn_gain_less.setText("??)
+        self.btn_gain_less.setText("−")
         self.btn_gain_less.setFixedSize(30, 30) 
         self.btn_gain_less.setStyleSheet("QToolButton { font-size: 20px; font-weight: bold; background-color: #444; color: #F0E68C; border: 1px solid #555; border-radius: 2px; } QToolButton:hover { background-color: #555; }")
         
@@ -2779,7 +2777,7 @@ class ModernTranscoderUI(QMainWindow):
         self.params_layout.addWidget(target_group)
 
         # Output Settings
-        lbl_out_header = QLabel("輸出設�? (Output)")
+        lbl_out_header = QLabel("輸出設定 (Output)")
         lbl_out_header.setStyleSheet(HEADER_STYLE)
         self.params_layout.addWidget(lbl_out_header)
         
@@ -2790,7 +2788,7 @@ class ModernTranscoderUI(QMainWindow):
         btn_out.setIcon(self.style().standardIcon(QStyle.SP_DirIcon))
         btn_out.setFixedSize(45, 45) 
         btn_out.setIconSize(QSize(32, 32))
-        btn_out.setToolTip("?��?輸出資�?�?(Select Output Folder)")
+        btn_out.setToolTip("選擇輸出資料夾 (Select Output Folder)")
         btn_out.setStyleSheet("""
             QToolButton { background-color: transparent; border: 1px solid #555; border-radius: 4px; }
             QToolButton:hover { background-color: #444; border-color: #777; }
@@ -2801,7 +2799,7 @@ class ModernTranscoderUI(QMainWindow):
         
         # History Menu (Output)
         self.btn_hist_out = QToolButton()
-        self.btn_hist_out.setText("??)
+        self.btn_hist_out.setText("▼")
         self.btn_hist_out.setPopupMode(QToolButton.InstantPopup)
         self.btn_hist_out.setFixedSize(25, 45)
         self.btn_hist_out.setStyleSheet("""
@@ -2814,7 +2812,7 @@ class ModernTranscoderUI(QMainWindow):
         self.btn_hist_out.setMenu(self.menu_hist_out)
         out_layout.addWidget(self.btn_hist_out)
         
-        self.lbl_output_path = QLabel("?�設 (Default)")
+        self.lbl_output_path = QLabel("預設 (Default)")
         self.lbl_output_path.setWordWrap(True)
         # Highlight Style
         self.lbl_output_path.setStyleSheet("""
@@ -2835,17 +2833,17 @@ class ModernTranscoderUI(QMainWindow):
         
         # Naming & Seq
         name_layout = QHBoxLayout()
-        self.chk_rename = QCheckBox("?��?:")
+        self.chk_rename = QCheckBox("改名:")
         self.chk_rename.setStyleSheet("color: #ccc;") 
         self.chk_rename.toggled.connect(self.save_settings)
         name_layout.addWidget(self.chk_rename)
         
         self.edit_base_name = QLineEdit()
-        self.edit_base_name.setPlaceholderText("主�???..")
+        self.edit_base_name.setPlaceholderText("主檔名...")
         self.edit_base_name.textChanged.connect(self.save_settings)
         name_layout.addWidget(self.edit_base_name, 1)
         
-        name_layout.addWidget(QLabel("�?"))
+        name_layout.addWidget(QLabel("序:"))
         self.spin_seq = QSpinBox()
         self.spin_seq.setRange(1, 999)
         self.spin_seq.setValue(1)
@@ -2855,13 +2853,13 @@ class ModernTranscoderUI(QMainWindow):
         self.params_layout.addLayout(name_layout)
         
         # Actions - REMOVED per user request
-        # self.btn_add_task = QPushButton("?�入任�? (Queue)")
+        # self.btn_add_task = QPushButton("加入任務 (Queue)")
         # ...
-        # self.btn_execute = QPushButton("?��?轉碼 (START)")
+        # self.btn_execute = QPushButton("開始轉碼 (START)")
         # ...
         
         # Settings Path Info
-        settings_path_lbl = QLabel(f"設�?存於: {os.path.abspath('settings.json')}")
+        settings_path_lbl = QLabel(f"設定存於: {os.path.abspath('settings.json')}")
         settings_path_lbl.setStyleSheet("color: #555; font-size: 10px; margin-top: 20px;")
         self.params_layout.addWidget(settings_path_lbl)
         
@@ -2877,7 +2875,7 @@ class ModernTranscoderUI(QMainWindow):
         
         # Header Row
         mon_header = QHBoxLayout()
-        lbl_q_title = QLabel("?��?任�??��? (Manual Task Queue)")
+        lbl_q_title = QLabel("手動任務隊列 (Manual Task Queue)")
         lbl_q_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         lbl_q_title.setStyleSheet("font-weight: bold; padding-left: 10px;")
         mon_header.addWidget(lbl_q_title)
@@ -2885,7 +2883,7 @@ class ModernTranscoderUI(QMainWindow):
         
         # Clear Button
         self.btn_clear_list = QToolButton()
-        self.btn_clear_list.setText(" 清空?�表 (Clear)")
+        self.btn_clear_list.setText(" 清空列表 (Clear)")
         self.btn_clear_list.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
         self.btn_clear_list.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         # self.btn_clear_list.setFixedSize(120, 24) # Removed fixed size to allow expansion
@@ -2910,16 +2908,16 @@ class ModernTranscoderUI(QMainWindow):
         dbh_layout.setSpacing(10)
 
         col_lbls = [
-            ("任�??�稱", TaskProgressWidget.WIDTHS["name"]), 
-            ("?�??, TaskProgressWidget.WIDTHS["status"]), 
-            ("?��?資�?", TaskProgressWidget.WIDTHS["fmt"]), 
-            ("轉碼起�?", TaskProgressWidget.WIDTHS["start"]), 
-            ("?�能", TaskProgressWidget.WIDTHS["perf"]), 
-            ("來�?", TaskProgressWidget.WIDTHS["src"]), 
-            ("節點別??, TaskProgressWidget.WIDTHS["node"]), 
-            ("?�度", TaskProgressWidget.WIDTHS["prog"]), 
-            ("完�??��?", TaskProgressWidget.WIDTHS["fin"]), 
-            ("?��?", TaskProgressWidget.WIDTHS["act"])
+            ("任務名稱", TaskProgressWidget.WIDTHS["name"]), 
+            ("狀態", TaskProgressWidget.WIDTHS["status"]), 
+            ("格式資訊", TaskProgressWidget.WIDTHS["fmt"]), 
+            ("轉碼起始", TaskProgressWidget.WIDTHS["start"]), 
+            ("效能", TaskProgressWidget.WIDTHS["perf"]), 
+            ("來源", TaskProgressWidget.WIDTHS["src"]), 
+            ("節點別名", TaskProgressWidget.WIDTHS["node"]), 
+            ("進度", TaskProgressWidget.WIDTHS["prog"]), 
+            ("完成時間", TaskProgressWidget.WIDTHS["fin"]), 
+            ("操作", TaskProgressWidget.WIDTHS["act"])
         ]
         for txt, w in col_lbls:
             l = QLabel(txt)
@@ -2963,7 +2961,7 @@ class ModernTranscoderUI(QMainWindow):
         hist_header.setStyleSheet("background-color: #333; border-top: 2px solid #555; border-bottom: 1px solid #444;")
         hh_layout = QHBoxLayout(hist_header)
         hh_layout.setContentsMargins(15, 0, 5, 0)
-        hh_label = QLabel("??��記�? (History & Logs)")
+        hh_label = QLabel("監控記錄 (History & Logs)")
         hh_label.setStyleSheet("color: #FFA726; font-weight: bold;")
         hh_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         hh_layout.addWidget(hh_label)
@@ -2991,7 +2989,7 @@ class ModernTranscoderUI(QMainWindow):
 
     def add_files(self):
         start_dir = getattr(self, 'last_source_dir', "")
-        files, _ = QFileDialog.getOpenFileNames(self, "?��?影音檔�?", start_dir)
+        files, _ = QFileDialog.getOpenFileNames(self, "選擇影音檔案", start_dir)
         
         if not files: return
         
@@ -3029,7 +3027,7 @@ class ModernTranscoderUI(QMainWindow):
 
     def select_output_dir(self):
         start_dir = getattr(self, 'output_dir', "")
-        d = QFileDialog.getExistingDirectory(self, "?��?輸出資�?�?(Select Output Folder)", start_dir)
+        d = QFileDialog.getExistingDirectory(self, "選擇輸出資料夾 (Select Output Folder)", start_dir)
         if d:
             self.output_dir = os.path.normpath(d)
             self.lbl_output_path.setText(self.output_dir)
@@ -3081,7 +3079,7 @@ class ModernTranscoderUI(QMainWindow):
                  self.lbl_output_path.setText(src_dir)
 
     def save_current_as_preset(self):
-        name, ok = QInputDialog.getText(self, "?��??�設 (Save Preset)", "請輸?��?設�?�?")
+        name, ok = QInputDialog.getText(self, "儲存預設 (Save Preset)", "請輸入預設名稱:")
         if ok and name:
             presets = self.settings.get("presets", self.default_settings["presets"])
             presets[name] = {
@@ -3111,9 +3109,9 @@ class ModernTranscoderUI(QMainWindow):
         if curr == "Custom / Unsaved": return
         
         msg = QMessageBox()
-        msg.setWindowTitle("?�除?�設")
-        msg.setText("已�?�?)
-        msg.setInformativeText("要�??��??��?式�?")
+        msg.setWindowTitle("刪除預設")
+        msg.setText("已運行")
+        msg.setInformativeText("要重新開啟程式？")
         msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         msg.setDefaultButton(QMessageBox.No)
         msg.setIcon(QMessageBox.Question)
@@ -3222,13 +3220,13 @@ class ModernTranscoderUI(QMainWindow):
                  # Blue "Already Re-decoded" State
                  self.lbl_vcodec.setText(f"V.Codec: {display_codec}")
                  self.lbl_vcodec.setStyleSheet("color: #0078d4; font-weight: bold; font-size: 11px;")
-                 self.btn_fix_codec.setText(f"已�??�解�?({display_codec.upper()})")
+                 self.btn_fix_codec.setText(f"已重新解碼 ({display_codec.upper()})")
                  self.btn_fix_codec.setStyleSheet("background-color: #0078d4; color: white; border-radius: 4px; padding: 2px 8px; font-weight: bold;")
                  self.btn_fix_codec.show()
              elif 'unknown' in codec or codec == '':
                  # Red "Re-Decode" State
                  self.lbl_vcodec.setStyleSheet("color: red; font-weight: bold; font-size: 11px;")
-                 self.btn_fix_codec.setText("?�新�?�� (Re-Decode)")
+                 self.btn_fix_codec.setText("重新解碼 (Re-Decode)")
                  self.btn_fix_codec.setStyleSheet("background-color: #d32f2f; color: white; border-radius: 4px; padding: 2px 8px; font-weight: bold;")
                  self.btn_fix_codec.show()
              else:
@@ -3242,7 +3240,7 @@ class ModernTranscoderUI(QMainWindow):
              self.btn_fix_codec.hide()
 
     def select_output_dir(self):
-        dir_path = QFileDialog.getExistingDirectory(self, "?��?輸出?��?")
+        dir_path = QFileDialog.getExistingDirectory(self, "選擇輸出目錄")
         if dir_path:
             self.output_dir = dir_path
             self.lbl_output_path.setText(dir_path)
@@ -3273,7 +3271,7 @@ class ModernTranscoderUI(QMainWindow):
 
     def apply_source_settings(self):
         if not hasattr(self, 'current_source') or not self.current_source:
-             QMessageBox.warning(self, "?�示", "請�?載入源�? (Please load a source file first)")
+             QMessageBox.warning(self, "提示", "請先載入源檔 (Please load a source file first)")
              return
             
         from core.metadata import get_video_metadata
@@ -3281,7 +3279,7 @@ class ModernTranscoderUI(QMainWindow):
         print(f"DEBUG: Metadata: {meta}") # Audit Log
         
         if not meta: 
-            self.statusBar().showMessage("?��?讀?��?檔�?�?(Failed to read metadata)", 3000)
+            self.statusBar().showMessage("無法讀取源檔資訊 (Failed to read metadata)", 3000)
             return
         
         # 1. Container
@@ -3395,7 +3393,7 @@ class ModernTranscoderUI(QMainWindow):
         # Status Feedback
         info = f"Container: {self.combo_container.currentText()} | Codec: {self.combo_vcodec.currentText()} | Bitrate: {final_kbps}k"
         if hasattr(self, 'statusBar'):
-            self.statusBar().showMessage(f"已�??? {info}", 5000)
+            self.statusBar().showMessage(f"已套用: {info}", 5000)
 
     def fix_video_codec(self):
         if not self.current_source: return
@@ -3403,11 +3401,11 @@ class ModernTranscoderUI(QMainWindow):
         meta = get_video_metadata(self.current_source)
         is_sles = meta and ("SLES" in meta.get("codec_tag", "") or meta.get("codec") == "unknown")
         
-        msg = "檢測?�未?�編碼。是?��?試�??�為標�? H.264 ?��?�?
+        msg = "檢測到未知編碼。是否嘗試轉換為標準 H.264 格式？"
         if is_sles:
-            msg = "?�測??SLES (Sony LX) ?�未?�編碼。\n將使??[科學?�測 + 快速�?裝] (Smart Remux) ?��??��??�\n(Video Pass-through, Audio AAC, Container TS)"
+            msg = "偵測到 SLES (Sony LX) 或未知編碼。\n將使用 [科學偵測 + 快速封裝] (Smart Remux) 方式處理。\n(Video Pass-through, Audio AAC, Container TS)"
             
-        reply = QMessageBox.question(self, "?�新�?�� (Re-Decode)", 
+        reply = QMessageBox.question(self, "重新解碼 (Re-Decode)", 
                                    msg,
                                    QMessageBox.Yes | QMessageBox.No)
                                    
@@ -3421,7 +3419,7 @@ class ModernTranscoderUI(QMainWindow):
             fixed_path = os.path.splitext(src)[0] + "_remux.ts"
             
             # Show progress dialog with readable styling
-            progress = QProgressDialog("�??封�?�?(Remuxing)... 不�??�質", "?��? (Cancel)", 0, 0, self)
+            progress = QProgressDialog("解析封裝中 (Remuxing)... 不損畫質", "取消 (Cancel)", 0, 0, self)
             progress.setWindowModality(Qt.WindowModal)
             progress.setStyleSheet("""
                 QProgressDialog { background-color: white; color: black; }
@@ -3466,9 +3464,9 @@ class ModernTranscoderUI(QMainWindow):
                 if hasattr(self.player, 'media_player'):
                      self.player.media_player.play()
                      
-                QMessageBox.information(self, "完�?", "?�新�?��完�?！已?�接?�放?�\n(Re-decode Complete! Playing now.)")
+                QMessageBox.information(self, "完成", "重新解碼完成！已直接播放。\n(Re-decode Complete! Playing now.)")
             else:
-                QMessageBox.critical(self, "?�誤", "?�新�?��失�??��?檢查?��??�\n(Failed to re-decode.)")
+                QMessageBox.critical(self, "錯誤", "重新解碼失敗。請檢查日誌。\n(Failed to re-decode.)")
 
     def clean_up_after_task(self):
         self.current_running_task = None
@@ -3573,8 +3571,8 @@ class ModernTranscoderUI(QMainWindow):
     def clear_dashboard_finished(self):
         # [v27.10.22] Full Revert logic: Point to main clearer
         self.clear_task_list(sender=self.btn_clear_dash)
-        
-        # [v27.10.54] NUCLEAR CLEAR: After UI purge, also wipe physicall cluster task files
+
+        # [v27.10.55] NUCLEAR CLEAR: Also wipe physical cluster task files
         # to prevent ghost tasks from reloading on next restart.
         try:
             if hasattr(self, 'cluster_mgr'):
@@ -3588,20 +3586,19 @@ class ModernTranscoderUI(QMainWindow):
                                 cleared_count += 1
                             except Exception as e:
                                 debug_log(f"Clear: Failed to remove cluster task {f}: {e}")
-                    debug_log(f"[v27.10.54] Nuclear clear: removed {cleared_count} cluster files from {task_dir}")
+                    debug_log(f"[v27.10.55] Nuclear clear: removed {cleared_count} cluster files from {task_dir}")
         except Exception as e:
-            debug_log(f"[v27.10.54] Nuclear clear error: {e}")
-        
-        # [v27.10.54] Reset watch_folder history so files can be detected fresh
+            debug_log(f"[v27.10.55] Nuclear clear error: {e}")
+
+        # [v27.10.55] Reset watch_folder history so files can be detected fresh
         try:
             if hasattr(self, 'watch_engine') and self.watch_engine:
                 self.watch_engine.processed_files = {}
                 self.watch_engine._seen_this_session = set()
                 self.watch_engine.save_history()
-                debug_log("[v27.10.54] Watch folder history cleared after dashboard clear.")
+                debug_log("[v27.10.55] Watch folder history cleared after dashboard clear.")
         except Exception as e:
-            debug_log(f"[v27.10.54] Watch history reset error: {e}")
-
+            debug_log(f"[v27.10.55] Watch history reset error: {e}")
 
     def clear_task_list(self, sender=None):
         # [v27.7] Dynamic Clearing: Stage 1 (Success) -> Stage 2 (All)
@@ -3610,7 +3607,7 @@ class ModernTranscoderUI(QMainWindow):
         if not btn: return
         
         current_text = btn.text()
-        clear_all_mode = "清除?�?? in current_text
+        clear_all_mode = "清除所有" in current_text
         
         dismissed = self.settings.get("dismissed_dashboard_items", [])
         if not isinstance(dismissed, list): dismissed = []
@@ -3623,7 +3620,7 @@ class ModernTranscoderUI(QMainWindow):
             if not list_widget: return
             
             # Success statuses only for Stage 1
-            success_statuses = ["Done", "完�? (Done)", "Completed"]
+            success_statuses = ["Done", "完成 (Done)", "Completed"]
             
             for i in range(list_widget.count() - 1, -1, -1):
                 item = list_widget.item(i)
@@ -3698,7 +3695,7 @@ class ModernTranscoderUI(QMainWindow):
             
         if total_remaining > 0 and not clear_all_mode:
             # Transition to Stage 2
-            btn.setText(" 清除?�??(Clear All)")
+            btn.setText(" 清除所有 (Clear All)")
             if isinstance(btn, QToolButton):
                 btn.setStyleSheet("""
                     QToolButton { background-color: #d32f2f; color: white; border: 1px solid #ff5252; border-radius: 4px; font-size: 11px; padding: 0 10px; }
@@ -3708,7 +3705,7 @@ class ModernTranscoderUI(QMainWindow):
                 btn.setStyleSheet("background-color: #d32f2f; color: white; border-radius: 4px;")
         else:
             # Reset to Stage 1
-            btn.setText(" 清除已�???(Clear Finished)")
+            btn.setText(" 清除已完成 (Clear Finished)")
             if isinstance(btn, QToolButton):
                 btn.setStyleSheet("""
                     QToolButton { background-color: transparent; color: #aaa; border: 1px solid #555; border-radius: 4px; font-size: 11px; padding: 0 10px; }
@@ -3731,7 +3728,7 @@ class ModernTranscoderUI(QMainWindow):
         """Helper to reset all clear buttons to Stage 1 (Clear Finished) state."""
         for btn in [getattr(self, 'btn_clear_list', None), getattr(self, 'btn_clear_dash', None)]:
             if not btn: continue
-            btn.setText(" 清除已�???(Clear Finished)")
+            btn.setText(" 清除已完成 (Clear Finished)")
             if isinstance(btn, QToolButton):
                 btn.setStyleSheet("""
                     QToolButton { background-color: transparent; color: #aaa; border: 1px solid #555; border-radius: 4px; font-size: 11px; padding: 0 10px; }
@@ -3760,7 +3757,7 @@ class ModernTranscoderUI(QMainWindow):
         else:
             if not self.current_source:
                 if source_type == "Manual":
-                    QMessageBox.warning(self, "?��?�?(No Source)", "請�?載入?�播?��??�影?��?�?(Please load a video first)")
+                    QMessageBox.warning(self, "無來源 (No Source)", "請先載入或播放一個影片檔案 (Please load a video first)")
                 return
             source = self.current_source
             
@@ -3935,9 +3932,9 @@ class ModernTranscoderUI(QMainWindow):
         item.setSizeHint(QSize(0, 36)) # Reduced height        
         # [NEW] Visual Distinction
         display_label = final_base
-        # [FIX] Removed [??��] prefix to match cluster naming and prevent confusion
+        # [FIX] Removed [監控] prefix to match cluster naming and prevent confusion
         # if source_type != "Manual":
-        #    display_label = f"[??��] {final_base}"
+        #    display_label = f"[監控] {final_base}"
             
         widget = TaskProgressWidget(display_label)
         
@@ -3976,7 +3973,7 @@ class ModernTranscoderUI(QMainWindow):
             item_mirror = QListWidgetItem(self.auto_task_list)
             item_mirror.setSizeHint(QSize(0, 36))
             
-            widget_mirror = TaskProgressWidget(f"[?��??��?] {final_base}")
+            widget_mirror = TaskProgressWidget(f"[手動鏡像] {final_base}")
             widget_mirror.setStyleSheet("QFrame#TaskRow { background-color: #2b2b2b; } QLabel { color: #e0e0e0; font-style: italic; }")
             widget_mirror.set_task_data(task)
             widget_mirror.lbl_status.setText("Pending")
@@ -4096,7 +4093,7 @@ class ModernTranscoderUI(QMainWindow):
                 
                 # Feedback
                 if hasattr(self, 'statusBar'):
-                    self.statusBar().showMessage(f"已�??�任?��?�? {os.path.basename(src)}", 3000)
+                    self.statusBar().showMessage(f"已載入任務來源: {os.path.basename(src)}", 3000)
 
     def start_transcoding_queue(self):
         if not self.pending_tasks:
@@ -4135,9 +4132,9 @@ class ModernTranscoderUI(QMainWindow):
                  if not fix_params:
                      # Check for Input Errors specifically
                      if "Error opening input" in log or "Invalid argument" in log:
-                         suggestion = "?��??��?輸入檔�??�可?�是路�??�含?��?字�??��?案被佔用?��?壞。\n\n?�使?�置?�數也可?�無法解決輸?��?題�?但您?�以?�試 [安全?�置] 作為?�後�?段�?
+                         suggestion = "無法開啟輸入檔案。可能是路徑包含特殊字元、檔案被佔用或損壞。\n\n即使重置參數也可能無法解決輸入問題，但您可以嘗試 [安全重置] 作為最後手段。"
                      else:
-                         suggestion = (suggestion + "\n\n?�� 系統?��?識別?��??�誤，�??�可以�?�?[安全?�置] (H.264/AAC)??) if suggestion else "?�知?�誤?�\n\n?�� 建議：�?�?[安全?�置]??
+                         suggestion = (suggestion + "\n\n💡 系統無法識別具體錯誤，但您可以嘗試 [安全重置] (H.264/AAC)。") if suggestion else "未知錯誤。\n\n💡 建議：嘗試 [安全重置]。"
                      
                      fix_params = {"vcodec": "libx264", "acodec": "aac", "container": "mp4"}
                  
@@ -4192,7 +4189,7 @@ class ModernTranscoderUI(QMainWindow):
                     # [v27.10.50] Skip already-running or done tasks.
                     # CRITICAL: Must skip 'Processing' to prevent double-execution loop.
                     t_status = t.get("status", "")
-                    if any(s in t_status for s in ["Done", "完�?", "Completed", "Processing", "Running", "?��?�?]):
+                    if any(s in t_status for s in ["Done", "完成", "Completed", "Processing", "Running", "進行中"]):
                         continue
 
                     cf = t.get("cluster_filename")
@@ -4284,7 +4281,7 @@ class ModernTranscoderUI(QMainWindow):
                     # [v27.3] Skip reachability check if task is already Done or Processing elsewhere.
                     # This prevents false "Source Missing" failures when one node finishes and moves the file.
                     current_status = task.get("status") or ""
-                    if "Done" in current_status or "完�?" in current_status or "Processing" in current_status:
+                    if "Done" in current_status or "完成" in current_status or "Processing" in current_status:
                         debug_log(f"Skipping reachability check for task {task.get('base_name')} with status: {current_status}")
                     else:
                         # [FIX] Normalize for Windows UNC (Handle mixed slashes / vs \)
@@ -4361,7 +4358,7 @@ class ModernTranscoderUI(QMainWindow):
         if duration == 0 and not task.get("growing"):
              debug_log("[RUN_TRANSCODE] ERROR: Probe failed (Duration 0).")
              if hasattr(widget, 'set_failed'):
-                  widget.set_failed("?��?�??影�?資�?(路�??�誤?�碼流�?�?")
+                  widget.set_failed("無法解析影片資訊(路徑錯誤或碼流損壞)")
              return
         
         # Codec Selection
@@ -4416,9 +4413,9 @@ class ModernTranscoderUI(QMainWindow):
         manual_out = getattr(self, 'output_dir', None)
         is_auto = task.get("source_type") != "Manual"
 
-        # [NEW] ??��任�?使用 _TEMP 資�?夾進�?轉碼，�??��??�移?�到?�終目??
+        # [NEW] 監控任務使用 _TEMP 資料夾進行轉碼，完成後再移動到最終目錄
         if is_auto:
-            # 決�??�終輸?�目??
+            # 決定最終輸出目錄
             if worker_out and os.path.isdir(worker_out):
                  final_output_dir = worker_out
             
@@ -4432,12 +4429,12 @@ class ModernTranscoderUI(QMainWindow):
             else:
                  final_output_dir = None
             
-            # ?��??�終輸?�目?��?轉碼完�?後使??
+            # 儲存最終輸出目錄供轉碼完成後使用
             task["final_output_dir"] = final_output_dir
             
             # [FIX] Try to use _TEMP, but fallback to direct output if it fails
             try:
-                # 轉碼?��?使用來�???��資�?夾�???_TEMP
+                # 轉碼期間使用來源監控資料夾下的 _TEMP
                 src_watch_folder = os.path.dirname(task["source"])
                 temp_dir = os.path.join(src_watch_folder, "_TEMP")
                 debug_log(f"[RUN_TRANSCODE] Checking _TEMP: {temp_dir}")
@@ -4458,7 +4455,7 @@ class ModernTranscoderUI(QMainWindow):
                     task["output_dir"] = os.path.dirname(task["source"])
             
         else:
-            # ?��?任�?：直?�使?��?終輸?�目??
+            # 手動任務：直接使用最終輸出目錄
             if manual_out and os.path.isdir(manual_out):
                 task["output_dir"] = manual_out
             else:
@@ -4542,20 +4539,20 @@ class ModernTranscoderUI(QMainWindow):
 
     def browse_cluster_path(self):
         """Opens a folder dialog to select the cluster sync path."""
-        path = QFileDialog.getExistingDirectory(self, "?��??�群?�步路�?")
+        path = QFileDialog.getExistingDirectory(self, "選擇集群同步路徑")
         if path:
             self.edit_cluster_path.setText(path)
 
     def browse_worker_output_path(self):
         """Opens a folder dialog to select the worker-specific output path."""
-        path = QFileDialog.getExistingDirectory(self, "?��???��任�?專用輸出路�?")
+        path = QFileDialog.getExistingDirectory(self, "選擇監控任務專用輸出路徑")
         if path:
             self.edit_worker_out.setText(path)
 
     def save_global_settings_ui(self):
         new_cluster_path_raw = self.edit_cluster_path.text().strip()
         if not new_cluster_path_raw:
-             QMessageBox.warning(self, "設�?失�?", "?�群?�步路�?不能?�空??)
+             QMessageBox.warning(self, "設定失敗", "集群同步路徑不能為空。")
              return
 
         # Resolve Absolute Path for cluster path
@@ -4571,12 +4568,12 @@ class ModernTranscoderUI(QMainWindow):
              try:
                  os.makedirs(new_cluster_path, exist_ok=True)
              except Exception as e:
-                 QMessageBox.critical(self, "路�??��?", 
-                     f"?��?建�??��??��?群路徑�?\n{new_cluster_path}\n\n"
-                     f"?��?：{e}\n\n"
-                     "?�� 補強?��?：\n"
-                     "1. 請檢?�網路�?碟�??�否已正確�?�?(�?Z:\\)?�\n"
-                     "2. ?�使??UNC 路�? (\\\\server\\share)，�?確�??��?使用?�具?��?寫�??��?)
+                 QMessageBox.critical(self, "路徑無效", 
+                     f"無法建立或存取集群路徑：\n{new_cluster_path}\n\n"
+                     f"原因：{e}\n\n"
+                     "💡 補強做法：\n"
+                     "1. 請檢查網路磁碟機是否已正確映射 (如 Z:\\)。\n"
+                     "2. 若使用 UNC 路徑 (\\\\server\\share)，請確保當前使用者具有讀寫權限。")
                  return
 
         old_cluster_path = self.settings.get("cluster_path", "")
@@ -4622,11 +4619,11 @@ class ModernTranscoderUI(QMainWindow):
                   if hasattr(self, 'node_list'):
                        self.node_list.clear()
 
-        msg = (f"?�群設�?已儲存�?\n\n"
-               f"?��??�?? {current_role} (Auto)\n"
-               f"?�步路�?: {new_cluster_path}\n\n"
-               "???��?節點現?��??�透�?此路徑�??��??�步??)
-        QMessageBox.information(self, "設�??��?", msg)
+        msg = (f"集群設定已儲存！\n\n"
+               f"目前狀態: {current_role} (Auto)\n"
+               f"同步路徑: {new_cluster_path}\n\n"
+               "✅ 其他節點現在應能透過此路徑與本機同步。")
+        QMessageBox.information(self, "設定成功", msg)
 
     def do_factory_reset(self, silent=False):
         """Clears all settings, history, and cache, then relaunch."""
@@ -4635,9 +4632,9 @@ class ModernTranscoderUI(QMainWindow):
         if not silent:
             from PySide6.QtWidgets import QMessageBox
             msg = QMessageBox(self)
-            msg.setWindowTitle("工�??�置 (Factory Reset)")
-            msg.setText("此�?作�?清除?�?�設定、歷?��??��??�群快�?�?)
-            msg.setInformativeText("程�?將隨後自?��??��?請�??��??��?)
+            msg.setWindowTitle("工廠重置 (Factory Reset)")
+            msg.setText("此操作將清除所有設定、歷史紀錄與集群快取！")
+            msg.setInformativeText("程式將隨後自動關閉，請重新啟動。")
             msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             msg.setDefaultButton(QMessageBox.No)
             msg.setIcon(QMessageBox.Warning)
@@ -4738,7 +4735,7 @@ class ModernTranscoderUI(QMainWindow):
         val = get_recommended_concurrency()
         self.spin_parallel.setValue(val)
         if hasattr(self, 'statusBar'):
-            self.statusBar().showMessage(f"已根?�硬體�??�建議並行數: {val}", 3000)
+            self.statusBar().showMessage(f"已根據硬體套用建議並行數: {val}", 3000)
 
     def refresh_watch_list_ui(self):
         print("DEBUG_UI: Refreshing Watch List UI...")
@@ -4752,7 +4749,7 @@ class ModernTranscoderUI(QMainWindow):
             header_item = QListWidgetItem(self.watch_list)
             header_item.setFlags(Qt.NoItemFlags) # Non-selectable
             header_item.setSizeHint(QSize(0, 30))
-            lbl = QLabel(f"?? ??��?��??�主節點管??(Managed by Master: {master_alias})")
+            lbl = QLabel(f"🔒 監控目錄由主節點管理 (Managed by Master: {master_alias})")
             lbl.setStyleSheet("color: #FFA726; font-weight: bold; padding-left: 10px; font-style: italic; background: #333;")
             self.watch_list.addItem(header_item)
             self.watch_list.setItemWidget(header_item, lbl)
@@ -4814,10 +4811,10 @@ class ModernTranscoderUI(QMainWindow):
              layout = QHBoxLayout(self._failover_notification)
              layout.setContentsMargins(15, 0, 15, 0)
              
-             lbl = QLabel("?��? ?�測?�主機斷線�?系統將在 30 秒內?��??�管??(Master Offline: Auto-promoting...)", self._failover_notification)
+             lbl = QLabel("⚠️ 偵測到主機斷線：系統將在 30 秒內自動接管。 (Master Offline: Auto-promoting...)", self._failover_notification)
              lbl.setStyleSheet("color: white; font-weight: bold;")
              
-             btn = QPushButton("立即?�管 (Promote Now)", self._failover_notification)
+             btn = QPushButton("立即接管 (Promote Now)", self._failover_notification)
              btn.setFixedWidth(150)
              btn.setStyleSheet("background: white; color: #b71c1c; font-weight: bold; border: none; height: 30px;")
              btn.clicked.connect(self.perform_manual_failover)
@@ -4846,8 +4843,8 @@ class ModernTranscoderUI(QMainWindow):
         # 2. Grab Lock
         self.cluster_mgr.promote_to_master()
         
-        msg = "已接管為主�??�已繼承上�??�主機設定�? if success else "已接?�為主�? (?�發?��?份設�???
-        QMessageBox.information(self, "?�管?��?", msg)
+        msg = "已接管為主機。已繼承上一台主機設定。" if success else "已接取為主機 (未發現備份設定)。"
+        QMessageBox.information(self, "接管成功", msg)
         
         # 3. Refresh UI
         self.refresh_watch_list_ui()
@@ -4866,7 +4863,7 @@ class ModernTranscoderUI(QMainWindow):
         print(f"DEBUG_UI: Watch Folder Event Triggered: {os.path.basename(file_path)}")
         
         # [REMOVED v27.10.34] Instant Placeholder Task for Dashboard
-        # User found [?�測中] confusing. We wait for background thread now.
+        # User found [探測中] confusing. We wait for background thread now.
 
         # Launch Background Thread
         thread = WatchTaskCreationThread(file_path, folder_name, self)
@@ -4937,7 +4934,7 @@ class ModernTranscoderUI(QMainWindow):
             # Update Header Info
             role = self.settings.get("cluster_role", "Master")
             path = self._get_safe_cluster_path()
-            self.lbl_node_info.setText(f"?��?辨�?�?(Local Node): {self.cluster_mgr.node_id}  |  角色: [{role}]  |  ?�步路�?: {path}")
+            self.lbl_node_info.setText(f"本機辨識碼 (Local Node): {self.cluster_mgr.node_id}  |  角色: [{role}]  |  同步路徑: {path}")
             
             # Get Nodes
             nodes = self.cluster_mgr.get_all_nodes() or {}
@@ -5166,7 +5163,7 @@ class ModernTranscoderUI(QMainWindow):
                 
             elif category == 'error':
                  w_item.setSizeHint(QSize(0, 36))
-                 widget = TaskProgressWidget(f"[?�誤] {item['base_name']}")
+                 widget = TaskProgressWidget(f"[錯誤] {item['base_name']}")
                  widget.set_task_data(enriched_data) # [FIX v27.5] Apply enriched metadata
                  widget.setStyleSheet("QFrame#TaskRow { background-color: #302020; } QLabel { color: #ff8a80; }")
                  widget.lbl_status.setText("Failed")
@@ -5179,7 +5176,7 @@ class ModernTranscoderUI(QMainWindow):
                  w_item.setSizeHint(QSize(0, 36))
                  # Use claimed info if available
                  claimed = item.get("claimed_by")
-                 display_name = item['base_name'] # [FIX] Removed [待�?] prefix
+                 display_name = item['base_name'] # [FIX] Removed [待機] prefix
                  
                  widget = TaskProgressWidget(display_name)
                  widget.set_task_data(enriched_data) # [FIX v27.5] Apply enriched metadata
@@ -5210,8 +5207,8 @@ class ModernTranscoderUI(QMainWindow):
             
             # [v27.10.51] Done style re-applied by set_done() above - no need to duplicate here
             if category == 'done':
-                # Ensure text is consistent (set_done sets '完�? (Done)')
-                widget.lbl_status.setText("完�? (Done)")
+                # Ensure text is consistent (set_done sets '完成 (Done)')
+                widget.lbl_status.setText("完成 (Done)")
                 widget.lbl_status.setStyleSheet("color: #4CAF50; font-weight: bold; border: none;")
             
             # Connect Signals
@@ -5252,11 +5249,11 @@ class ModernTranscoderUI(QMainWindow):
         self.on_nav_clicked(self.btn_cluster)
 
     def add_watch_folder_ui(self):
-        path = QFileDialog.getExistingDirectory(self, "?��???��資�?�?)
+        path = QFileDialog.getExistingDirectory(self, "選擇監控資料夾")
         if not path: return
         
         # 1. Name first (for convenience)
-        name, ok = QInputDialog.getText(self, "??��任�??�稱", "請輸?��??��?�?", QLineEdit.Normal, os.path.basename(path))
+        name, ok = QInputDialog.getText(self, "監控任務名稱", "請輸入識別名稱:", QLineEdit.Normal, os.path.basename(path))
         if not (ok and name): return
         
         # 2. Preset Selection (Custom Large List)
@@ -5278,11 +5275,11 @@ class ModernTranscoderUI(QMainWindow):
         wf = watch_folders[index]
         
         # 1. Edit Path
-        path = QFileDialog.getExistingDirectory(self, "?�改??��資�?�?, wf.get("path"))
+        path = QFileDialog.getExistingDirectory(self, "更改監控資料夾", wf.get("path"))
         if not path: return
         
         # 2. Edit Name
-        name, ok = QInputDialog.getText(self, "?�改??��?�稱", "請輸?�新?�稱:", QLineEdit.Normal, wf.get("name"))
+        name, ok = QInputDialog.getText(self, "更改監控名稱", "請輸入新名稱:", QLineEdit.Normal, wf.get("name"))
         if not (ok and name): return
         
         # 3. Edit Preset (Custom Large List)
@@ -5302,7 +5299,7 @@ class ModernTranscoderUI(QMainWindow):
         """Removes a watch folder entry."""
         watch_folders = self.settings.get("watch_folders", [])
         if 0 <= index < len(watch_folders):
-            reply = QMessageBox.question(self, "?�除確�?", f"確�?要移?�監??'{watch_folders[index].get('name')}' ?��?", 
+            reply = QMessageBox.question(self, "刪除確認", f"確定要移除監控 '{watch_folders[index].get('name')}' 嗎？", 
                                          QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.Yes:
                 watch_folders.pop(index)
@@ -5336,7 +5333,7 @@ class ModernTranscoderUI(QMainWindow):
                         norm_p = os.path.normpath(sub_path)
                         subprocess.Popen(f'explorer "{norm_p}"')
                 else:
-                    QMessageBox.warning(self, "存�??�誤", f"?��?存�??�建立路�? {sub_path}\n請檢?��??��?網路?????)
+                    QMessageBox.warning(self, "存取錯誤", f"無法存取或建立路徑: {sub_path}\n請檢查權限及網路連線。")
 
 
 
@@ -5347,7 +5344,7 @@ class ModernTranscoderUI(QMainWindow):
             # [FIX] Race Condition Guard: If status is Done/Completed, Ignore late progress
             # This prevents 99% progress signal overwriting the 100% completion state
             lbl = getattr(widget, 'lbl_status', None)
-            if lbl and (lbl.text() == "Done" or lbl.text() == "Completed" or lbl.text() == "完�? (Done)" or getattr(widget, 'state', '') == 'done'):
+            if lbl and (lbl.text() == "Done" or lbl.text() == "Completed" or lbl.text() == "完成 (Done)" or getattr(widget, 'state', '') == 'done'):
                 # Force 100% just in case it was missed or reverted
                 if widget.progress.value() < 100:
                      widget.progress.setValue(100)
@@ -5452,7 +5449,7 @@ class ModernTranscoderUI(QMainWindow):
                             try:
                                 reason, _ = self.analyze_error_suggestion(msg)
                                 final_reason = reason.split('\n')[0] if reason else "Transcode Failed"
-                                widget.lbl_status.setText(f"失�?: {final_reason}")
+                                widget.lbl_status.setText(f"失敗: {final_reason}")
                                 widget.lbl_status.setStyleSheet("color: #ef5350; font-weight: bold;")
                                 widget.state = "failed"
                                 widget.last_error_log = msg
@@ -5531,54 +5528,54 @@ class ModernTranscoderUI(QMainWindow):
     def analyze_error_suggestion(self, log_output):
         """Analyzes FFmpeg log to provide actionable fixes."""
         if not log_output:
-            return ("?�知?�誤", None)
+            return ("未知錯誤", None)
             
         log_lower = log_output.lower()
         
         # [NEW] Invalid Data (The focus of the fix)
         if "invalid data found" in log_lower:
-            return ("檔�?毀?��?資�??�常 (Invalid Data)?�\n\n?�� 建議：�?檢查來�?檔�??�否完整，�??�否?��??�援?��?體格式�?, None)
+            return ("檔案毀損或資料異常 (Invalid Data)。\n\n💡 建議：請檢查來源檔案是否完整，或是否為不支援的變體格式。", None)
             
         if "no such file" in log_lower:
-            return ("?��??��?源�?案�?網路路�??�誤?�\n\n?�� 建議：�?確�? NAS ????��?案是?�被移�???, None)
+            return ("找不到來源檔案或網路路徑錯誤。\n\n💡 建議：請確認 NAS 連線與檔案是否被移動。", None)
 
         # 1. FPS / Standard Mismatch
         if "drop frame" in log_lower and "multiples of 30000/1001" in log_lower:
-            return ("?�測??[影格??(Frame Rate)] ?�選定�??��?不匹?�。\n?��?來�?檔�??�能??NTSC (29.97fps)，�??��?設�??�能??25fps ?�其他�??�容?�值。\n\n?�� 建議：自?��??��?影格?�修�?�� 29.97 以符?�電視制式�?, 
+            return ("偵測到 [影格率 (Frame Rate)] 與選定的制式不匹配。\n您的來源檔案可能是 NTSC (29.97fps)，但目前設定可能為 25fps 或其他不相容數值。\n\n💡 建議：自動將目標影格率修正為 29.97 以符合電視制式。", 
                     {"fps": "29.97"})
 
         # 2. Container/Codec Incompatibility (e.g. MXF doesn't support AAC)
         if "mxf" in log_lower and "aac" in log_lower:
-            return ("MXF 封�??��?不支??AAC ?��?編碼?�\n\n?�� 建議：自?��??��??�為穩�?且�??�質??PCM (s16le) 編碼??, 
+            return ("MXF 封裝格式不支援 AAC 音訊編碼。\n\n💡 建議：自動將音訊改為穩定且高品質的 PCM (s16le) 編碼。", 
                     {"acodec": "pcm_s16le"})
 
         # 3. Write Header failures (often bitrate or codec params)
         if "could not write header" in log_lower or "incorrect codec parameters" in log_lower:
-             return ("封�??�數?�誤?�這通常?��??�編碼�??��?位�??��?被該容器?�援?�\n\n?�� 建議：�??�為?�用??H.264 + MP4 組�??�試??, 
+             return ("封裝參數錯誤。這通常是因為編碼組合或位元率不被該容器支援。\n\n💡 建議：切換為通用的 H.264 + MP4 組合重試。", 
                      {"container": "mp4", "vcodec": "libx264", "acodec": "aac"})
 
         # 4. MPEG Container Audio Codec mismatch (The error in log)
         if "mpeg" in log_lower and "unsupported audio codec" in log_lower:
-             return ("MPEG 封�??��?不支?�目?�選?��??��?編碼 (�?AAC)?�\n\n?�� 建議：自?��??��??�為 MPEG ?�援??AC3 ??MP2 編碼以確保相容性�?, 
+             return ("MPEG 封裝格式不支援目前選取的音訊編碼 (如 AAC)。\n\n💡 建議：自動將音訊改為 MPEG 支援的 AC3 或 MP2 編碼以確保相容性。", 
                      {"acodec": "ac3"})
 
         if "permission denied" in log_lower:
-             return ("輸出?��??�寫?��??��??��?碟空?��?足。\n\n?�� 請檢?�目標�??�夾權�???, None)
+             return ("輸出目錄無寫入權限，或磁碟空間不足。\n\n💡 請檢查目標資料夾權限。", None)
 
         if "unknown codec" in log_lower:
-             return ("來�?檔編碼無法�??��??�常見於?��??��??�。\n\n?�� 建議：使?�主介面??[?�新�?�� (Re-Decode)] ?��??�試修復??, None)
+             return ("來源檔編碼無法識別，這常見於損壞的素材。\n\n💡 建議：使用主介面的 [重新解碼 (Re-Decode)] 按鈕嘗試修復。", None)
 
         if "invalid argument" in log_lower or "error splitting the argument list" in log_lower:
-             return ("?�數?��??�誤 (Invalid Argument)?�這通常?��??�路徑�??�特殊�??�、括?��??��?些�?碼�??��??��?編碼?��??�。\n\n?�� 建議?��?：�?試簡?�輸?��??��?並�???[?�容模�?]?? ,
+             return ("參數傳遞錯誤 (Invalid Argument)。這通常發生在路徑包含特殊字元、括號，或某些轉碼參數超出了編碼器限制。\n\n💡 建議方案：嘗試簡化輸出檔名，並套用 [相容模式]。" ,
                      {"container": "mp4", "vcodec": "libx264", "acodec": "aac"})
 
         if "error initializing output stream" in log_lower or "codec initialization failed" in log_lower:
-             return ("編碼?��?始�?失�??�這可?�是?�為?��??�硬體�??�器 (�?NVENC/QSV) �?��被其他�?式�??��??��?源解?�度超出了硬體�??�。\n\n?�� 建議?��?：�?編碼?��??�為?�容?��?高�? CPU 軟�?編碼 (libx264)??,
+             return ("編碼器初始化失敗。這可能是因為選定的硬體加速器 (如 NVENC/QSV) 正在被其他程式佔用，或來源解析度超出了硬體限制。\n\n💡 建議方案：將編碼器切換為相容性最高的 CPU 軟體編碼 (libx264)。",
                      {"vcodec": "libx264"})
             
         # 5. Default "Safety Mode" Suggestion
         # If we can't find a specific error, offer a force-compatibility fix instead of nothing.
-        return ("?�然?��?定�??��??��?，�??��??�誤?�常?�路徑中?�特殊�??��?不相容�?編碼?�數?��??�\n\n?�� 建議?��?：�???[?�容模�? (Safety Fix)]，�?容器強制設為 MP4 並使?��?�?H.264 編碼?�次?�試??, 
+        return ("雖然無法定位具體成因，但這類錯誤通常與路徑中的特殊字元或不相容的編碼參數有關。\n\n💡 建議方案：套用 [相容模式 (Safety Fix)]，將容器強制設為 MP4 並使用標準 H.264 編碼再次嘗試。", 
                 {"container": "mp4", "vcodec": "libx264", "acodec": "aac"})
 
     # [FIX] Added missing history method
@@ -5633,14 +5630,14 @@ class ModernTranscoderUI(QMainWindow):
                 
                 if final_dest and temp_output and os.path.exists(temp_output):
                     try:
-                        # 確�??�終輸?�目?��???
+                        # 確保最終輸出目錄存在
                         if not os.path.exists(final_dest):
                             os.makedirs(final_dest)
                         
-                        # 計�??�終路�?
+                        # 計算最終路徑
                         final_path = os.path.join(final_dest, os.path.basename(temp_output))
                         
-                        # ?��?檔�?衝�?
+                        # 處理檔名衝突
                         if os.path.exists(final_path):
                             base, ext = os.path.splitext(final_path)
                             timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -5655,13 +5652,13 @@ class ModernTranscoderUI(QMainWindow):
                             # Keep original ref if move failed
                             final_path = temp_output
                         
-                        # ?�新任�??�輸?�路徑�??�為?�終路�?
+                        # 更新任務的輸出路徑引用為最終路徑
                         task["output_path_ref"] = final_path
                         output_path = final_path
                         
                     except Exception as move_err:
                         debug_log(f"Failed to move from _TEMP to final output: {move_err}")
-                        # 如�?移�?失�?，�??�在 _TEMP（至少�?碼�??��?�?
+                        # 如果移動失敗，保持在 _TEMP（至少轉碼成功了）
                         pass
                 
                 # [FIX] Final UI Update via set_done to ensure 100% and Play Button
@@ -5867,7 +5864,7 @@ class ModernTranscoderUI(QMainWindow):
                      
                      # [v27.7.1] Strictly ignore completed/failed tasks for persistence
                      # Only 'Pending', 'Transcoding...', 'Waiting...' etc should be saved.
-                     ignore_parts = ["Done", "完�?", "Failed", "失�?", "Error", "?�誤", "Cancelled", "?��?"]
+                     ignore_parts = ["Done", "完成", "Failed", "失敗", "Error", "錯誤", "Cancelled", "取消"]
                      if any(p in status for p in ignore_parts):
                          continue
                          
@@ -5985,14 +5982,6 @@ class ModernTranscoderUI(QMainWindow):
              task_data["source_type"] = source_type
              task_data["worker_id"] = task_data.get("worker_id", "-")
              
-             # [v27.10.56] Store alias in task_data for persistent display
-             if not task_data.get("worker_alias"):
-                 try:
-                     wid = task_data["worker_id"]
-                     nd = self.cluster_mgr._known_nodes.get(wid, {})
-                     task_data["worker_alias"] = nd.get("alias", "") or ""
-                 except Exception:
-                     pass
              # [FIX] Restore Assignment
              if "assigned_to" in task_data:
                  task_data["assigned_to"] = task_data["assigned_to"]
@@ -6108,7 +6097,7 @@ class ModernTranscoderUI(QMainWindow):
                  self.refresh_watch_list_ui()
                  
                  if hasattr(self, 'statusBar'):
-                     self.statusBar().showMessage("?? 已�?步�?群�?窗設�?(Watch Folders Synced)", 3000)
+                     self.statusBar().showMessage("📈 已同步集群視窗設定 (Watch Folders Synced)", 3000)
 
     def on_cluster_task_synced(self, task_data):
         """Handler for tasks broadcasted by other nodes."""
@@ -6407,7 +6396,7 @@ class ModernTranscoderUI(QMainWindow):
         
         # 2. Update UI (Header/Status)
         if hasattr(self, 'lbl_role_status'):
-            self.lbl_role_status.setText(f"?��??�?? {new_role} (Auto)")
+            self.lbl_role_status.setText(f"目前狀態: {new_role} (Auto)")
             if new_role == "Master":
                 self.lbl_role_status.setStyleSheet("color: #4CAF50; font-weight: bold; font-size: 14px;")
             else:
@@ -6490,7 +6479,7 @@ class ModernTranscoderUI(QMainWindow):
         # Resource limit check
         active_running = [w for w in self.workers.values() if not w.paused]
         if len(active_running) > 0:
-             QMessageBox.warning(self, "資�??�制", "?�能?��??��?一?��?碼任?�。�??�暫?�其他任?��?)
+             QMessageBox.warning(self, "資源限制", "只能同時進行一個轉碼任務。請先暫停其他任務。")
              return
         
         if widget in self.workers:
@@ -6521,7 +6510,7 @@ class ModernTranscoderUI(QMainWindow):
             QMenu::item:selected { background-color: #3d3d3d; }
         """)
         
-        action_reset = menu.addAction("?�置?�除記�? (Reset Deleted History)")
+        action_reset = menu.addAction("重置刪除記錄 (Reset Deleted History)")
         action_reset.triggered.connect(self.reset_cleared_history)
         
         btn = self.sender() if self.sender() else self.btn_clear_list
@@ -6531,15 +6520,15 @@ class ModernTranscoderUI(QMainWindow):
         """Clears the exclusion list so deleted tasks can be re-imported."""
         confirm = QMessageBox.question(
             self, 
-            "?�置記�? (Reset History)", 
-            "確�?要�??��??�「已?�除任�??��?記�??��?\n\n清除後�?之�??�除?�任?��??��?案�?存在，�??��?次被?�測並�??��??�。\n(?�可以解決『第?��?不出?�』�??��?)",
+            "重置記錄 (Reset History)", 
+            "確定要清除所有「已刪除任務」的記錄嗎？\n\n清除後，之前刪除的任務如果檔案仍存在，將會再次被偵測並加入佇列。\n(這可以解決『第八集不出現』的問題)",
             QMessageBox.Yes | QMessageBox.No
         )
         
         if confirm == QMessageBox.Yes:
             self.cleared_tasks.clear()
             self.save_cleared_tasks()
-            QMessageBox.information(self, "已�?�?, "?�除記�?已�?空。\n請�??�獲?�新?��? Watch Folder??)
+            QMessageBox.information(self, "已重置", "刪除記錄已清空。\n請稍候獲重新掃描 Watch Folder。")
 
             
             # Refresh specific row or whole list? simple refresh whole list
