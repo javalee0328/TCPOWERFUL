@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QGridLayout, QStackedLayout, QComboBox, QDoubleSpinBox,
     QInputDialog, QMessageBox, QProgressDialog, QMenu, QWidgetAction,
     QToolButton, QStyle, QAbstractSpinBox, QDialog, QTextEdit, QSlider,
-    QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy
+    QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy, QStyleFactory
 )
 from PySide6.QtCore import Qt, QSize, QProcess, QTimer, QDir, QEvent, Signal, QRectF, QThread, QTime
 from PySide6.QtGui import QIcon, QAction, QKeySequence, QShortcut, QPixmap, QPainter, QPainterPath, QPen, QColor, QKeyEvent, QBrush, QPalette
@@ -703,14 +703,17 @@ class TaskProgressWidget(QWidget):
         self.progress.setMinimumWidth(self.WIDTHS["prog"])  # [v27.10.52] Double-lock width
         self.progress.setMaximumWidth(self.WIDTHS["prog"])
         self.progress.setTextVisible(True)
-        # [v27.10.52] Unified QSS - margin-right:-1px fixes Qt Windows 100% fill gap
+        # [v27.10.53] CRITICAL: Apply Fusion style to bypass Qt Windows native style
+        # Windows native style ignores CSS margin on ::chunk causing 1-2px gap at 100%
+        # Fusion style fully respects QSS, guaranteeing pixel-perfect fill
+        self.progress.setStyle(QStyleFactory.create("Fusion"))
         self.progress.setStyleSheet("""
             QProgressBar {
                 background-color: #333; border: none; border-radius: 0px;
                 height: 26px; max-height: 26px;
                 text-align: center; color: white; font-size: 11px; font-weight: bold;
             }
-            QProgressBar::chunk { background-color: #2e7d32; border-radius: 0px; margin: 0px; margin-right: -1px; }
+            QProgressBar::chunk { background-color: #2e7d32; border-radius: 0px; margin: 0px; }
         """)
         layout.addWidget(self.progress)
 
@@ -813,14 +816,15 @@ class TaskProgressWidget(QWidget):
         self.progress.setRange(0, 100) # Ensure range is fixed
         self.progress.setValue(100)    # Force 100%
         self.progress.setFormat("100%")
-        # [v27.10.52] Done state - dark green background, same unified QSS
+        # [v27.10.53] Done state - dark green bg, Fusion style for proper fill
+        self.progress.setStyle(QStyleFactory.create("Fusion"))
         self.progress.setStyleSheet("""
             QProgressBar {
                 background-color: #1a3a1a; border: none; border-radius: 0px;
                 height: 26px; max-height: 26px;
                 text-align: center; color: white; font-size: 11px; font-weight: bold;
             }
-            QProgressBar::chunk { background-color: #2e7d32; border-radius: 0px; margin: 0px; margin-right: -1px; }
+            QProgressBar::chunk { background-color: #2e7d32; border-radius: 0px; margin: 0px; }
         """)
         
         # [FIX] Use real file modification time if available
