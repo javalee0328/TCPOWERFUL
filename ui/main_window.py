@@ -4622,9 +4622,13 @@ class ModernTranscoderUI(QMainWindow):
                 debug_log(f"Alias instant update error: {ae}")
 
         
-        
+
+        # Determine effective role for logic below
+        current_role = self.settings.get("cluster_role", "Worker")
+
         # Apply Logic: If Worker, stop watch engine
         # Apply Logic based on CURRENT detected role
+
         if current_role == "Worker":
             if self.watch_engine.isRunning():
                 # print("Settings: Status is Worker. Stopping Watch Engine...")
@@ -5802,7 +5806,7 @@ class ModernTranscoderUI(QMainWindow):
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #0f0f0f;
-                font-family: 'Segoe UI', sans-serif;
+                font-family: 'Microsoft JhengHei', 'Segoe UI', sans-serif;
                 font-size: 13px; /* Standard Pixel Size */
             }
             * {
