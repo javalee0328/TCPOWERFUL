@@ -3553,6 +3553,35 @@ class ModernTranscoderUI(QMainWindow):
     def clear_dashboard_finished(self):
         # [v27.10.22] Full Revert logic: Point to main clearer
         self.clear_task_list(sender=self.btn_clear_dash)
+        
+        # [v27.10.54] NUCLEAR CLEAR: After UI purge, also wipe physicall cluster task files
+        # to prevent ghost tasks from reloading on next restart.
+        try:
+            if hasattr(self, 'cluster_mgr'):
+                task_dir = os.path.join(self.cluster_mgr._cluster_path, "tasks")
+                if os.path.exists(task_dir):
+                    cleared_count = 0
+                    for f in os.listdir(task_dir):
+                        if f.endswith(".json") or f.endswith(".lock"):
+                            try:
+                                os.remove(os.path.join(task_dir, f))
+                                cleared_count += 1
+                            except Exception as e:
+                                debug_log(f"Clear: Failed to remove cluster task {f}: {e}")
+                    debug_log(f"[v27.10.54] Nuclear clear: removed {cleared_count} cluster files from {task_dir}")
+        except Exception as e:
+            debug_log(f"[v27.10.54] Nuclear clear error: {e}")
+        
+        # [v27.10.54] Reset watch_folder history so files can be detected fresh
+        try:
+            if hasattr(self, 'watch_engine') and self.watch_engine:
+                self.watch_engine.processed_files = {}
+                self.watch_engine._seen_this_session = set()
+                self.watch_engine.save_history()
+                debug_log("[v27.10.54] Watch folder history cleared after dashboard clear.")
+        except Exception as e:
+            debug_log(f"[v27.10.54] Watch history reset error: {e}")
+
 
     def clear_task_list(self, sender=None):
         # [v27.7] Dynamic Clearing: Stage 1 (Success) -> Stage 2 (All)
