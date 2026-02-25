@@ -90,6 +90,7 @@ class Transcoder:
                     encoding='utf-8',
                     errors='replace',
                     check=True, 
+                    timeout=15, # [FIX v27.10.70] NAS/UNC path hang protection
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0
                 )
                 dur = float(result.stdout.strip())

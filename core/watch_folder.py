@@ -9,7 +9,7 @@ class WatchFolderEngine(QThread):
     Automatically triggers transcoding based on folder-specific presets.
     Runs in a separate thread to prevent UI blocking.
     """
-    file_detected = Signal(str, str) # file_path, folder_name
+    file_detected = Signal(str, str, bool) # file_path, folder_name, is_repeat
     snapshot_ready = Signal(dict) # [NEW] Signal for async dashboard data
 
     def __init__(self, settings_manager, parent=None):
@@ -134,6 +134,14 @@ class WatchFolderEngine(QThread):
             if not path or not os.path.exists(path):
                 continue
             
+            # [v27.10.68] Pro-active folder creation (DONE, TEMP, ERROR)
+            try:
+                for sub in ["DONE", "TEMP", "ERROR"]:
+                    p = os.path.join(path, sub)
+                    if not os.path.exists(p):
+                        os.makedirs(p, exist_ok=True)
+            except: pass
+            
             try:
                 # print(f"WatchFolderEngine: Scanning {path}...")
                 for filename in os.listdir(path):
@@ -175,13 +183,16 @@ class WatchFolderEngine(QThread):
                         # WITH THE SAME mtime, it was processed in a prior session.
                         # Skip it silently to prevent re-queuing on every app restart.
                         hist_mtime = self.processed_files.get(file_path)
-                        if hist_mtime is not None and abs(hist_mtime - current_mtime) < 2.0:
+                        
+                        is_history_repeat = (hist_mtime is not None)
+                        
+                        if is_history_repeat and abs(hist_mtime - current_mtime) < 2.0:
                             # File is unchanged since last run. Mark as seen so we don't re-check.
                             self._seen_this_session.add(file_path)
                             current_files_mtimes[file_path] = current_mtime
                             continue
 
-                        print(f"WatchFolderEngine: [EVENT] NEW FILE Detected: {filename}")
+                        print(f"WatchFolderEngine: [EVENT] NEW FILE Detected: {filename} (Repeat: {is_history_repeat})")
                         if self.is_file_ready(file_path):
                             print(f"WatchFolderEngine: [READY] Emit detected signal: {filename}")
                             # [v27.10.61 FIX] Emit FIRST, THEN update history.
@@ -189,13 +200,10 @@ class WatchFolderEngine(QThread):
                             # always sees is_repeat=True and adds an HHMMSS timestamp.
                             # By emitting first, history is empty for this file → is_repeat=False.
                             self._seen_this_session.add(file_path)
-                            self.file_detected.emit(file_path, wf.get("name", "WatchFolder"))
+                            self.file_detected.emit(file_path, wf.get("name", "WatchFolder"), is_history_repeat)
                             # Update persistent history AFTER emit
                             self.processed_files[file_path] = current_mtime
                             self.save_history()
-                        else:
-                            # If not ready, we DON'T add it to current_files_mtimes yet 
-                            pass
 
                     elif mtime_changed:
                         print(f"WatchFolderEngine: [UPDATE] File {filename} updated (mtime changed)")
@@ -252,6 +260,12 @@ class WatchFolderEngine(QThread):
         item structure: {'path', 'base_name', 'folder_name', 'timestamp', 'log_content'}
         """
         snapshot = {'pending': [], 'done': [], 'error': []}
+        
+        # [v27.10.62] Gate: Only Master should scan NAS for snapshot to avoid redundancy/conflicts
+        current_role = self.settings.get("cluster_role", "Worker")
+        if current_role != "Master":
+             return snapshot
+
         watch_folders = self.settings.get("watch_folders", [])
         
         valid_exts = [".mxf", ".mp4", ".mov", ".mkv", ".ts", ".mpg", ".avi", ".wmv"]
@@ -297,8 +311,8 @@ class WatchFolderEngine(QThread):
                 except Exception as e:
                     print(f"Snapshot Scan Error {target_dir}: {e}")
 
-            # [v27.7] Strict: Only scan Root (Pending/Active)
-            # Other subdirectories (_DONE, _ERROR) are now ignored as per user request.
+            # [v27.10.68] Strict: Only scan Root (Pending/Active)
+            # subdirectories (DONE, ERROR, _DONE, _ERROR) are now ignored.
             scan_dir(path, 'pending')
             
         return snapshot

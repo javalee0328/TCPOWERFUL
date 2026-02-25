@@ -93,15 +93,13 @@ class ClusterWorker(QObject):
     def initialize_structure(self):
         """Create necessary subdirectories only if a valid path is provided."""
         try:
-            # [v27.10.60] Strictly defer if marked as placeholder or no path set
-            if self._path_is_placeholder or not self._cluster_path:
-                print(f"ClusterWorker: Deferring folder creation (Placeholder Path)")
-                return
+            # [v27.10.67] Relax deferral: Allow if it's the internal CLUSTER_SYNC folder
+            # This ensures default local setup works out of the box.
+            if self._path_is_placeholder:
+                if "CLUSTER_SYNC" not in self._cluster_path:
+                    print(f"ClusterWorker: Deferring folder creation (Remote Placeholder Path)")
+                    return
             
-            # Further safety: If it points to app root/CLUSTER_SYNC, double check if it's absolute
-            if not os.path.isabs(self._cluster_path):
-                return
-
             if not os.path.exists(self._cluster_path):
                 os.makedirs(self._cluster_path, exist_ok=True)
             
@@ -114,6 +112,12 @@ class ClusterWorker(QObject):
             print(f"ClusterWorker: Init Error - {e}")
 
     def sync(self):
+        # [v27.10.67] Ensure structure exists (Recover if wiped by Master Reset)
+        # We only do this if we have a path.
+        if self._cluster_path and os.path.isabs(self._cluster_path):
+            if not os.path.exists(os.path.join(self._cluster_path, "nodes")):
+                self.initialize_structure()
+
         # 3. [NEW] Leader Election & Role Enforcement
         self._perform_leader_election()
         
@@ -254,6 +258,8 @@ class ClusterWorker(QObject):
             "alias": self.settings.get("worker_alias") or self.node_id
         }
         try:
+            # [v27.10.67] Final fallback to ensure dir exists
+            os.makedirs(os.path.dirname(node_file), exist_ok=True)
             with open(node_file, "w", encoding="utf-8") as f:
                 json.dump(hb_data, f, indent=2)
                 f.flush()
@@ -267,6 +273,7 @@ class ClusterWorker(QObject):
         node_dir = os.path.join(self._cluster_path, "nodes")
         if not os.path.exists(node_dir): return
         try:
+            now = time.time()
             cluster_nodes = [f for f in os.listdir(node_dir) if f.endswith(".json")]
             for filename in cluster_nodes:
                 filepath = os.path.join(node_dir, filename)
@@ -279,12 +286,22 @@ class ClusterWorker(QObject):
                         if nid:
                             ls = data.get("last_seen")
                             # [v27.10.41] Robust type handling for last_seen
+                            ts = ls
                             if ls:
                                 try:
                                     ts = ls if isinstance(ls, (int, float)) else datetime.datetime.fromisoformat(ls).timestamp()
                                     # [v27.10.49] Use abs() for diff to tolerate clock skew/future timestamps
-                                    diff = abs(time.time() - ts)
+                                    diff = abs(now - ts)
                                     IS_ONE_YEAR = abs(diff - 31536000) < 3600
+                                    
+                                    # [v27.10.64] Cleanup Logic: Remove files older than 1 hour
+                                    if diff > 3600 and not IS_ONE_YEAR:
+                                        try: 
+                                            os.remove(filepath)
+                                            debug_log(f"Cluster: Cleaned up stale node file: {filename}")
+                                            continue 
+                                        except: pass
+
                                     if diff < 60 or IS_ONE_YEAR: data["status"] = "Online"
                                     else: data["status"] = "Offline (Timeout)"
                                     data["last_seen"] = ts
@@ -479,9 +496,26 @@ class ClusterManager(QObject):
     def __init__(self, settings_manager, parent=None):
         super().__init__(parent)
         self.settings = settings_manager
-        import uuid
-        mac = str(uuid.getnode())[-6:]
-        self.node_id = f"{socket.gethostname()}-{mac}"
+        
+        # [v27.10.64] PERSISTENT NODE ID: Load from settings or generate once
+        stored_id = self.settings.get("cluster_node_id")
+        if stored_id:
+            self.node_id = stored_id
+        else:
+            import uuid
+            import socket
+            try:
+                # Use hostname + last 6 digits of MAC for uniqueness
+                mac = str(uuid.getnode())[-6:]
+                hostname = socket.gethostname()
+                self.node_id = f"{hostname}-{mac}"
+            except:
+                # Last resort fallback to random uuid
+                self.node_id = f"Node-{str(uuid.uuid4())[:8]}"
+            
+            self.settings.set("cluster_node_id", self.node_id)
+            debug_log(f"[CLUSTER] Generated new persistent Node ID: {self.node_id}")
+
         from core.settings import BASE_DIR
         
         # [v27.10.60] Check if path is explicitly set in settings

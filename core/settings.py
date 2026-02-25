@@ -39,7 +39,7 @@ if not os.path.exists(DATA_DIR):
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
 
 # [VERSIONING]
-CURRENT_VERSION = "v27.10.59"
+CURRENT_VERSION = "v27.10.72"
 
 # [v27.10.60] Relocate startup log to 'data'
 try:
