@@ -985,6 +985,18 @@ class TaskProgressWidget(QWidget):
         self.btn_play_result.hide() 
         self.btn_transcode.setIcon(self.create_geometric_icon("refresh", "#E0E0E0", size=20)) # Reset to Refresh icon for re-run
         self.btn_transcode.setToolTip("當前任務轉碼 (Start Transcode)") # Reset to initial state
+        
+        # [v27.10.73] Dynamic Status Display
+        s = task.get("status", "Pending")
+        self.lbl_status.setText(s)
+        # Apply style based on status
+        if "探測中" in s or "Probing" in s:
+            self.lbl_status.setStyleSheet("color: #BB86FC; font-weight: bold; font-style: italic;")
+        elif s == "Pending":
+            self.lbl_status.setStyleSheet("color: #ffa726; font-weight: bold;")
+        elif s == "Claimed":
+            self.lbl_status.setStyleSheet("color: #BB86FC; font-weight: bold;")
+        
         self.state = "pending" # FIX: Set to pending, NOT done
 
 
@@ -3822,9 +3834,8 @@ class ModernTranscoderUI(QMainWindow):
              widget.setStyleSheet("QFrame#TaskRow { background-color: #203020; } QLabel { color: #cfd8dc; }")
              
         widget.set_task_data(task) # Store Data & Set Tooltip
-        # Only set to Pending if not already set (e.g. to Claimed)
-        if widget.lbl_status.text() not in ["Claimed", "Processing"]:
-            widget.lbl_status.setText("Pending")
+        # [v27.10.73] Dynamic Initial Status (Respect probing/claimed state)
+        # set_task_data now handles lbl_status.setText(s)
         widget.removed.connect(self.remove_task_by_widget) # CONNECT SIGNAL
         widget.transcode_requested.connect(self.transcode_single_item) 
         widget.pause_requested.connect(self.pause_task)

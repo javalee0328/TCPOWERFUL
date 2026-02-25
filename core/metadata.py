@@ -36,7 +36,8 @@ def get_video_metadata(file_path):
             text=True, 
             encoding='utf-8',
             errors='replace',
-            creationflags=flags
+            creationflags=flags,
+            timeout=15 # [v27.10.73] Prevent hangs on bad network paths
         )
         
         data = json.loads(result.stdout)
