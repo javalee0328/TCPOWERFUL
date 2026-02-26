@@ -94,32 +94,41 @@ class LicenseManager:
 
     def check_protection(self):
         """
-        Unified Security Check: Supports both SafeNet Sentinel Dongles 
-        and USB Removable Drives with license.dat.
+        Unified Security Check: 1-Year Trial Edition
+        Stores the first execution date in the Windows Registry to track the 365-day trial period.
         """
+        import winreg
+        from datetime import datetime
+        
+        registry_path = r"Software\ProTranscoder2026\System"
+        install_date_key = "InstallDate"
         checked_ids = []
         
-        # 1. Check Sentinel / SafeNet Keys (Hardware Only)
-        sentinels = self.get_sentinel_devices()
-        if sentinels:
-             for instance_id, friendly_name in sentinels:
-                 checked_ids.append(f"Dongle: {friendly_name} ({instance_id})")
-             return True, "SafeNet Dongle Detected (Access Granted)", checked_ids
+        try:
+            # Try to read the installation date from registry
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_path, 0, winreg.KEY_READ)
+            install_date_str, _ = winreg.QueryValueEx(key, install_date_key)
+            winreg.CloseKey(key)
+            install_date = datetime.strptime(install_date_str, "%Y-%m-%d")
+        except OSError:
+            # Key doesn't exist, this is the very first run!
+            install_date = datetime.now()
+            try:
+                key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, registry_path)
+                winreg.SetValueEx(key, install_date_key, 0, winreg.REG_SZ, install_date.strftime("%Y-%m-%d"))
+                winreg.CloseKey(key)
+            except Exception as e:
+                # If we absolutely cannot write to registry, fallback gracefully
+                print(f"Trial Registry Write Error: {e}")
+                pass 
 
-        # 2. Check Removable Drives (License File)
-        drives = self.get_removable_drives()
-        for drive in drives:
-            serial = self.get_volume_serial(drive)
-            if not serial: continue
-            
-            checked_ids.append(f"USB: {drive} ({serial})")
-            license_path = os.path.join(drive, "license.dat")
-            
-            is_valid, msg, meta = self.verify_license_file(license_path, serial)
-            if is_valid:
-                return True, f"Welcome {meta.get('client_name', 'User')}", checked_ids
+        days_used = (datetime.now() - install_date).days
+        days_remaining = 365 - days_used
 
-        return False, "未偵測到加密鎖或授權檔案 (No Dongle or License Found)", checked_ids
+        if days_remaining < 0:
+             return False, f"試用期已結束 (Trial Expired on {(install_date).strftime('%Y-%m-%d')})", checked_ids
+        else:
+             return True, f"一年試用版 (Trial Version) - 剩餘 {days_remaining} 天", checked_ids
 
     def get_sentinel_devices(self):
         """Returns a list of connected SafeNet/Sentinel devices (InstanceIDs)."""
