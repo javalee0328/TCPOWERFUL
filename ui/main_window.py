@@ -1975,7 +1975,7 @@ class ModernTranscoderUI(QMainWindow):
         logo_path = os.path.join(base_path, "assets", "logo.png")
         if os.path.exists(logo_path):
             self.btn_home.setIcon(QIcon(logo_path))
-            self.btn_home.setIconSize(QSize(24, 24))
+            self.btn_home.setIconSize(QSize(36, 36))
         self.btn_dash = QPushButton("📊  Dashboard")
         self.btn_watch = QPushButton("👀  Watch Folders")
         self.btn_cluster = QPushButton("🖥  Cluster Status")
@@ -2907,35 +2907,8 @@ class ModernTranscoderUI(QMainWindow):
         self.manual_task_list = self.task_list
         # self.auto_task_list = self.task_list # [REMOVED] This caused the Dashboard widget to go orphan
 
+        # [REMOVED] History & Logs Section as per user request (Space optimization)
         
-        # [NEW] History & Logs Section (User Request #3)
-        hist_header = QFrame()
-        hist_header.setFixedHeight(30)
-        hist_header.setStyleSheet("background-color: #333; border-top: 2px solid #555; border-bottom: 1px solid #444;")
-        hh_layout = QHBoxLayout(hist_header)
-        hh_layout.setContentsMargins(15, 0, 5, 0)
-        hh_label = QLabel("監控記錄 (History & Logs)")
-        hh_label.setStyleSheet("color: #FFA726; font-weight: bold;")
-        hh_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        hh_layout.addWidget(hh_label)
-        hh_layout.addStretch()
-        mon_layout.addWidget(hist_header)
-        
-        self.history_list = QListWidget()
-        self.history_list.setAlternatingRowColors(True)
-        self.history_list.setStyleSheet("""
-            QListWidget {
-                background-color: #2b2b2b;
-                border: 1px solid #333;
-                border-radius: 4px;
-            }
-            QListWidget::item {
-                border-bottom: 1px solid #333;
-                color: #888;
-            }
-        """)
-        mon_layout.addWidget(self.history_list)
-
         content_splitter.addWidget(monitor_widget)
         
         self.trans_layout.addWidget(content_splitter)
@@ -6376,10 +6349,10 @@ class ModernTranscoderUI(QMainWindow):
              # For now, let's just ignore to keep the UI clean, or add to history_list
              return
 
-        # Filtering against local UI lists (manual, history)
-        for i in range(self.history_list.count()):
-            it = self.history_list.item(i)
-            w = self.history_list.itemWidget(it)
+        # Filtering against local UI lists (manual)
+        for i in range(self.manual_task_list.count()):
+            it = self.manual_task_list.item(i)
+            w = self.manual_task_list.itemWidget(it)
             if w:
                 h_data = getattr(w, 'task_data', {})
                 if h_data.get("base_name") == task_base: return
