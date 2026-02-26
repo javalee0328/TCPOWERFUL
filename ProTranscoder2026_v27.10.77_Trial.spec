@@ -35,7 +35,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='ProTranscoder2026_v27.10.77_Trial',
+    name='非凡碼力_v27.10.77_Trial',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

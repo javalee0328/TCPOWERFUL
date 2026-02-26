@@ -1335,7 +1335,7 @@ class ModernTranscoderUI(QMainWindow):
         
         # UI Setup
         from core.settings import CURRENT_VERSION
-        self.setWindowTitle(f"ProTranscoder 2026 - Windows 11 Edition ({CURRENT_VERSION})")
+        self.setWindowTitle(f"非凡碼力 2026 - 一年試用版 ({CURRENT_VERSION})")
         self.resize(1200, 800)
         self.current_source = ""
         self.pending_tasks = []
@@ -1969,10 +1969,10 @@ class ModernTranscoderUI(QMainWindow):
         sidebar_layout.setContentsMargins(0, 10, 0, 10)
         sidebar_layout.setSpacing(5)
         
-        self.btn_home = QPushButton("金碼湛 Transcoder")
+        self.btn_home = QPushButton(" 非凡碼力")
         script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         base_path = sys._MEIPASS if hasattr(sys, '_MEIPASS') else script_dir
-        logo_path = os.path.join(base_path, "assets", "logo.png")
+        logo_path = os.path.join(base_path, "assets", "feifan_logo.png")
         if os.path.exists(logo_path):
             self.btn_home.setIcon(QIcon(logo_path))
             self.btn_home.setIconSize(QSize(24, 24))
@@ -1989,6 +1989,28 @@ class ModernTranscoderUI(QMainWindow):
         self.btn_home.setChecked(True)
             
         sidebar_layout.addStretch()
+
+        # [NEW] Trial Edition Contact Info
+        lbl_contact = QLabel("聯絡我們 (Contact):")
+        lbl_contact.setStyleSheet("color: #888; font-size: 11px; font-weight: bold; margin-bottom: 2px;")
+        lbl_contact.setAlignment(Qt.AlignCenter)
+        sidebar_layout.addWidget(lbl_contact)
+
+        lbl_name = QLabel("李陳熹")
+        lbl_name.setStyleSheet("color: #aaa; font-size: 11px;")
+        lbl_name.setAlignment(Qt.AlignCenter)
+        sidebar_layout.addWidget(lbl_name)
+
+        lbl_email = QLabel("javalee0328@gmail.com")
+        lbl_email.setStyleSheet("color: #aaa; font-size: 11px;")
+        lbl_email.setAlignment(Qt.AlignCenter)
+        sidebar_layout.addWidget(lbl_email)
+
+        lbl_phone = QLabel("Mobile +886-916-147-088")
+        lbl_phone.setStyleSheet("color: #aaa; font-size: 11px; margin-bottom: 10px;")
+        lbl_phone.setAlignment(Qt.AlignCenter)
+        sidebar_layout.addWidget(lbl_phone)
+
         main_layout.addWidget(self.sidebar)
 
         # 2. Main Content Area (Stacked)

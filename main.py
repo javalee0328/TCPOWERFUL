@@ -44,9 +44,9 @@ if __name__ == "__main__":
     
     # Set application icon
     from PySide6.QtGui import QIcon
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.ico")
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "feifan_logo.png")
     if hasattr(sys, '_MEIPASS'):
-        icon_path = os.path.join(sys._MEIPASS, "assets", "icon.ico")
+        icon_path = os.path.join(sys._MEIPASS, "assets", "feifan_logo.png")
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
     
@@ -130,7 +130,7 @@ if __name__ == "__main__":
         # Already exists!
         from core.settings import CURRENT_VERSION
         msg = QMessageBox()
-        msg.setWindowTitle(f"ProTranscoder 2026 ({CURRENT_VERSION})")
+        msg.setWindowTitle(f"非凡碼力 2026 ({CURRENT_VERSION})")
 
         msg.setText("程式已在運行中 (Already Running)")
         msg.setInformativeText("請切換至已開啟的視窗。\n\nPlease switch to the existing window.")
@@ -155,7 +155,7 @@ if __name__ == "__main__":
 
     try:
         debug_log("Starting Application Init...")
-        app.setApplicationName("ProTranscoder 2026")
+        app.setApplicationName("非凡碼力 2026")
         
         # --- Two-Stage Hardware Protection Check ---
         from ui.startup_dialog import StartupCheckDialog
