@@ -11,6 +11,7 @@ class WatchFolderEngine(QThread):
     """
     file_detected = Signal(str, str, bool) # file_path, folder_name, is_repeat
     snapshot_ready = Signal(dict) # [NEW] Signal for async dashboard data
+    log_message = Signal(str)    # [v27.10.77] Real-time log for Dashboard
 
     def __init__(self, settings_manager, parent=None):
         super().__init__(parent)
@@ -24,6 +25,15 @@ class WatchFolderEngine(QThread):
         self._seen_this_session = set()  # [v27.10.52] Files seen at least once this session
         self.is_running = False
         self._snapshot_requested = False # Flag for async request
+
+    def _log(self, msg):
+        """[v27.10.77] Emit to both console and UI log panel."""
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        full = f"[{ts}] {msg}"
+        print(full)
+        try: self.log_message.emit(full)
+        except: pass
 
     def request_snapshot(self):
         """Thread-safe request for a snapshot."""
@@ -106,7 +116,7 @@ class WatchFolderEngine(QThread):
         current_role = self.settings.get("cluster_role", "Worker")
         if current_role != "Master":
              if not getattr(self, '_notified_wrong_role', False):
-                 print(f"WatchFolderEngine: Scissor! Engine is running but role is '{current_role}'. Aborting scan.")
+                 self._log(f"WatchFolderEngine: 角色 '{current_role}' 非主節點，暫停掃描。")
                  self._notified_wrong_role = True
              return
         self._notified_wrong_role = False
@@ -114,7 +124,7 @@ class WatchFolderEngine(QThread):
         watch_folders = self.settings.get("watch_folders", [])
         if not watch_folders:
             if not getattr(self, '_notified_empty', False):
-                print("WatchFolderEngine: Zero folders configured. Nothing to monitor.")
+                self._log("WatchFolderEngine: 未設定監控目錄。")
                 self._notified_empty = True
             return
         self._notified_empty = False
@@ -194,11 +204,7 @@ class WatchFolderEngine(QThread):
 
                         print(f"WatchFolderEngine: [EVENT] NEW FILE Detected: {filename} (Repeat: {is_history_repeat})")
                         if self.is_file_ready(file_path):
-                            print(f"WatchFolderEngine: [READY] Emit detected signal: {filename}")
-                            # [v27.10.61 FIX] Emit FIRST, THEN update history.
-                            # If we update history before emitting, WatchTaskCreationThread
-                            # always sees is_repeat=True and adds an HHMMSS timestamp.
-                            # By emitting first, history is empty for this file → is_repeat=False.
+                            self._log(f"[新檔] {filename}")
                             self._seen_this_session.add(file_path)
                             self.file_detected.emit(file_path, wf.get("name", "WatchFolder"), is_history_repeat)
                             # Update persistent history AFTER emit
@@ -206,9 +212,7 @@ class WatchFolderEngine(QThread):
                             self.save_history()
 
                     elif mtime_changed:
-                        print(f"WatchFolderEngine: [UPDATE] File {filename} updated (mtime changed)")
-                        # [v27.10.49] Even if it's updated, it will be added to mtimes below 
-                        # so it doesn't trigger 'is_new_appearance' yet.
+                        self._log(f"[更新] {filename} (mtime 變更)")
                         current_files_mtimes[file_path] = current_mtime
                             
             except Exception as e:
@@ -239,17 +243,15 @@ class WatchFolderEngine(QThread):
                         f.read(1)
                 except (IOError, PermissionError) as e:
                     # [FIX v27.9.17] Don't block on network permission errors
-                    # If size is stable, the file is likely ready despite permission issues
-                    print(f"WatchFolderEngine: WARNING - File '{os.path.basename(file_path)}' open test failed: {e}")
-                    print(f"WatchFolderEngine: Proceeding anyway since size is stable ({size1} bytes)")
+                    print(f"WatchFolderEngine: WARNING - '{os.path.basename(file_path)}' 開啟測試失敗: {e}")
                 
                 # [FIX v27.9.17] Return True if size is stable, regardless of open() result  
                 return True
             else:
                 if size1 != size2:
-                    print(f"WatchFolderEngine: File '{os.path.basename(file_path)}' still growing ({size1} -> {size2})")
+                    self._log(f"[等待] {os.path.basename(file_path)} 仍在寫入 ({size1}→{size2} bytes)")
                 elif size1 == 0:
-                    print(f"WatchFolderEngine: File '{os.path.basename(file_path)}' is empty (size 0)")
+                    self._log(f"[跳過] {os.path.basename(file_path)} 文件大小為 0")
         except Exception as e:
             print(f"WatchFolderEngine: Error checking file readiness: {e}")
         return False

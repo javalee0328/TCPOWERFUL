@@ -34,9 +34,11 @@ class ClusterWorker(QObject):
         self._known_tasks = {}
         self._known_nodes = {}
         self.current_activity = "Idle"
-        self.active_task_count = 0 # [NEW] Track count for load balancing
+        self.active_task_count = 0
         self.total_ram_gb = round(psutil.virtual_memory().total / (1024**3), 1)
-        self._first_sync = True # [FIX] Ensure we emit role on first run
+        self._first_sync = True
+        self._node_failure_penalty = {} # [v27.10.76] {node_id: {count, expires_at}}
+        self._rr_index = 0 # [v27.10.77] Round-Robin pointer for even task distribution
 
 
     def run_loop(self):
@@ -63,6 +65,26 @@ class ClusterWorker(QObject):
     def stop(self):
         self.running = False
         print("ClusterWorker: Stop Requested.")
+
+    def record_node_failure(self, node_id):
+        """[v27.10.76] Record a task failure for a node; penalizes it in future scoring."""
+        now = time.time()
+        entry = self._node_failure_penalty.get(node_id, {'count': 0, 'expires_at': 0})
+        if now > entry['expires_at']:
+            entry = {'count': 0, 'expires_at': 0}
+        entry['count'] += 1
+        entry['expires_at'] = now + 300  # Penalty lasts 5 min
+        self._node_failure_penalty[node_id] = entry
+        debug_log(f"Cluster: Failure penalty recorded for {node_id} (total={entry['count']})")
+
+    def _get_failure_penalty(self, node_id):
+        """[v27.10.76] Returns score penalty for a failing node."""
+        now = time.time()
+        entry = self._node_failure_penalty.get(node_id)
+        if not entry or now > entry.get('expires_at', 0):
+            return 0
+        return entry['count'] * 500  # Each failure adds 500 to score (heavily penalized)
+
 
     def set_activity(self, activity, count=0):
         self.current_activity = activity
@@ -163,7 +185,7 @@ class ClusterWorker(QObject):
                     current_lock = json.load(f)
                 
                 last_seen_lock = current_lock.get("timestamp", 0)
-                if now - last_seen_lock > 30:
+                if now - last_seen_lock > 15:  # [v27.10.77] 15s (was 30s) for faster failover
                     lock_stale = True
             except:
                 lock_stale = True
@@ -174,8 +196,8 @@ class ClusterWorker(QObject):
             # [v27.10.49] AUTO-FAILOVER: If lock is stale, take over!
             # Using randomized jitter based on node ID to avoid multiple nodes fighting
             # This ensures only one node wins the race condition on the lock file.
-            jitter = int(hashlib.md5(self.node_id.encode()).hexdigest(), 16) % 15 
-            time.sleep(jitter * 0.2) # 0-3s wait
+            jitter = int(hashlib.md5(self.node_id.encode()).hexdigest(), 16) % 5  # [v27.10.77] max 1s (was 3s)
+            time.sleep(jitter * 0.2)
             
             # Re-read lock after jitter to see if someone else claimed it
             if os.path.exists(lock_file):
@@ -183,7 +205,7 @@ class ClusterWorker(QObject):
                     with open(lock_file, 'r', encoding='utf-8') as f:
                         check_lock = json.load(f)
                     check_ts = check_lock.get("timestamp", 0)
-                    if abs(now - check_ts) < 30: # Someone else took it and refreshed within 30s
+                    if abs(now - check_ts) < 15: # [v27.10.77] Match new stale threshold
                         lock_stale = False
                 except: pass
             
@@ -391,8 +413,36 @@ class ClusterWorker(QObject):
                         task_data = json.load(f)
                     status = task_data.get("cluster_status", "Pending")
                     assigned_to = task_data.get("assigned_to")
+
+                    # [v27.10.76] Auto-reassign Failed tasks to a different node
+                    if status == "Failed" and assigned_to:
+                        failed_node = assigned_to
+                        self.record_node_failure(failed_node)
+                        alt_workers = [w for w in workers if w["id"] != failed_node]
+                        if not alt_workers:
+                            alt_workers = workers
+                        if alt_workers:
+                            alt_workers.sort(key=lambda x: x["score"] + self._get_failure_penalty(x["id"]))
+                            best_alt = alt_workers[0]
+                            task_data["assigned_to"] = best_alt["id"]
+                            task_data["cluster_status"] = "Pending"
+                            task_data["assignment_time"] = datetime.datetime.now().isoformat()
+                            task_data["previous_failure"] = failed_node
+                            with open(filepath, "w", encoding="utf-8") as f:
+                                json.dump(task_data, f, indent=2, ensure_ascii=False)
+                            best_alt["tasks"] += 1
+                            best_alt["score"] += 100
+                            debug_log(f"Cluster: Reassigned failed task from {failed_node} -> {best_alt['id']}")
+                        continue
+
                     if status == "Pending" and not assigned_to:
-                        best_worker = workers[0]
+                        # [v27.10.77] Round-Robin: pick next node in rotation, skip penalized nodes
+                        eligible = [w for w in workers if self._get_failure_penalty(w["id"]) == 0]
+                        if not eligible:
+                            eligible = workers  # fallback: use all if all penalized
+                        self._rr_index = self._rr_index % len(eligible)
+                        best_worker = eligible[self._rr_index]
+                        self._rr_index = (self._rr_index + 1) % len(eligible)
                         assigned_nid = best_worker["id"]
                         task_data["assigned_to"] = assigned_nid
                         task_data["cluster_status"] = "Assigned"

@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QGridLayout, QStackedLayout, QComboBox, QDoubleSpinBox,
     QInputDialog, QMessageBox, QProgressDialog, QMenu, QWidgetAction,
     QToolButton, QStyle, QAbstractSpinBox, QDialog, QTextEdit, QSlider,
-    QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy, QStyleFactory
+    QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy, QStyleFactory,
+    QPlainTextEdit
 )
 from PySide6.QtCore import Qt, QSize, QProcess, QTimer, QDir, QEvent, Signal, QRectF, QThread, QTime
 from PySide6.QtGui import QIcon, QAction, QKeySequence, QShortcut, QPixmap, QPainter, QPainterPath, QPen, QColor, QKeyEvent, QBrush, QPalette
@@ -165,6 +166,7 @@ class DongleCheckThread(QThread):
 # [NEW] Background Thread for Watch Folder Task Creation
 class WatchTaskCreationThread(QThread):
     task_ready = Signal(dict)
+    task_failed = Signal(str) # [v27.10.74] Signal placeholder_id to unblock stuck UI
     
     def __init__(self, file_path, folder_name, parent_ui, is_repeat=False):
         super().__init__()
@@ -182,6 +184,7 @@ class WatchTaskCreationThread(QThread):
             my_role = self.parent_ui.settings.get("cluster_role", "Worker")
             if my_role != "Master":
                  print("DEBUG_THREAD: Aborting WatchTaskCreationThread - Local node is no longer Master.")
+                 self.task_failed.emit(getattr(self, 'placeholder_id', ''))
                  return
 
             # 1. Metadata Probe
@@ -247,6 +250,7 @@ class WatchTaskCreationThread(QThread):
             self.task_ready.emit(task_data)
         except Exception as e:
             print(f"DEBUG_THREAD: WatchTaskCreationThread Error: {e}")
+            self.task_failed.emit(getattr(self, 'placeholder_id', '')) # [v27.10.74] Unblock placeholder
 
 class SmartFailureDialog(QDialog):
     """Professional dialog to translate technical errors into actionable solutions."""
@@ -1349,7 +1353,8 @@ class ModernTranscoderUI(QMainWindow):
         # [NEW] Initialize Watch Folder Engine
         self.watch_engine = WatchFolderEngine(self.settings, self)
         self.watch_engine.file_detected.connect(self.on_watch_folder_detected)
-        self.watch_engine.snapshot_ready.connect(self.populate_dashboard_ui) # [NEW]
+        self.watch_engine.snapshot_ready.connect(self.populate_dashboard_ui)
+        self.watch_engine.log_message.connect(self.append_watch_log)  # [v27.10.77] Live log
         
         # [NEW] Initialize Cluster Manager
         self.cluster_mgr = ClusterManager(self.settings, self)
@@ -1414,6 +1419,47 @@ class ModernTranscoderUI(QMainWindow):
         self.loading = False
         
         debug_log("MainWindow: Init Complete")
+
+    def closeEvent(self, event):
+        """[v27.10.75] Graceful shutdown: Kill all active FFmpeg workers before exit.
+        This releases all file handles so PyInstaller can clean its _MEI temp directory."""
+        debug_log("MainWindow: closeEvent - Killing active workers...")
+        
+        # 1. Stop Cluster Sync Timer
+        if hasattr(self, 'cluster_timer'):
+            try: self.cluster_timer.stop()
+            except: pass
+        
+        # 2. Stop Watch Folder Engine
+        if hasattr(self, 'watch_engine'):
+            try: self.watch_engine.stop()
+            except: pass
+        
+        # 3. Kill all active TranscodeWorkers (releases ffmpeg subprocess handles)
+        if hasattr(self, 'workers'):
+            for widget, worker in list(self.workers.items()):
+                try:
+                    worker.kill()   # Terminate FFmpeg process
+                    worker.quit()   # Quit the QThread
+                    worker.wait(1000) # Wait max 1s
+                except: pass
+        
+        # 4. Terminate any watch task creation threads
+        for thread in getattr(self, '_watch_task_threads', []):
+            try:
+                thread.quit()
+                thread.wait(500)
+            except: pass
+        
+        # 5. Stop ClusterManager worker thread
+        if hasattr(self, 'cluster_mgr') and hasattr(self.cluster_mgr, '_worker_thread'):
+            try:
+                self.cluster_mgr._worker_thread.quit()
+                self.cluster_mgr._worker_thread.wait(2000)
+            except: pass
+        
+        debug_log("MainWindow: closeEvent - Shutdown complete.")
+        event.accept()
 
     def _safe_move(self, src, dst, retries=8, delay=2.0):
         """[v27.10.50] Robust file move with copy+delete for NAS/locked files (WinError 32)."""
@@ -2170,15 +2216,35 @@ class ModernTranscoderUI(QMainWindow):
         """)
         self.dashboard_layout.addWidget(self.auto_task_list, 2)
         
-        # History Section
-        self.dashboard_layout.addWidget(QLabel("監控記錄 (History & Logs)"))
-        self.dashboard_history_list = QListWidget()
-        self.dashboard_history_list.setAlternatingRowColors(True)
-        self.dashboard_history_list.setStyleSheet("""
-            QListWidget { background-color: #2b2b2b; border: 1px solid #333; border-radius: 4px; }
-            QListWidget::item { border-bottom: 1px solid #333; color: #888; }
+        # History Section — Live Watch Log
+        log_header = QHBoxLayout()
+        lbl_log_title = QLabel("📋 監控日誌 (Watch Log)")
+        lbl_log_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #4CAF50;")
+        log_header.addWidget(lbl_log_title)
+        log_header.addStretch()
+        btn_clear_log = QPushButton("清除 (Clear)")
+        btn_clear_log.setFixedWidth(80)
+        btn_clear_log.setStyleSheet("QPushButton { background:#333; color:#888; border:1px solid #555; border-radius:3px; font-size:11px; } QPushButton:hover { color:#fff; }")
+        log_header.addWidget(btn_clear_log)
+        self.dashboard_layout.addLayout(log_header)
+
+        self.watch_log = QPlainTextEdit()
+        self.watch_log.setReadOnly(True)
+        self.watch_log.setMaximumBlockCount(500)  # Keep last 500 lines
+        self.watch_log.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #1a1a1a;
+                color: #a8d8a8;
+                border: 1px solid #333;
+                border-radius: 4px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 12px;
+                padding: 4px;
+            }
         """)
-        self.dashboard_layout.addWidget(self.dashboard_history_list, 1)
+        btn_clear_log.clicked.connect(self.watch_log.clear)
+        self.dashboard_layout.addWidget(self.watch_log, 1)
+
         
         self.stack.addWidget(self.dashboard_page)
 
@@ -4268,14 +4334,20 @@ class ModernTranscoderUI(QMainWindow):
             if hasattr(widget, 'set_failed'):
                 widget.set_failed("無法解析影片資訊(路徑錯誤或碼流損壞)")
             
-            # [FIX v27.10.69] Broadcast Failure to Cluster so others stop seeing 'Processing'
+            # [v27.10.76] Broadcast failure with cluster_status=Failed so Master auto-reassigns
             if hasattr(self, 'cluster_mgr'):
                 f_update = task.copy()
                 if "widget" in f_update: del f_update["widget"]
                 if "mirror_widget" in f_update: del f_update["mirror_widget"]
                 f_update["status"] = "Failed"
+                f_update["cluster_status"] = "Failed"  # [v27.10.76] KEY: triggers Master reassignment
                 f_update["error"] = "Probe failed (Duration 0)"
                 self.cluster_mgr.broadcast_task(f_update)
+            
+            # Release the task slot so queue can continue
+            if task["widget"] in self.workers:
+                self.workers.pop(task["widget"], None)
+            QTimer.singleShot(2000, self.process_next_task)
             return
         
         # Codec Selection
@@ -4826,6 +4898,15 @@ class ModernTranscoderUI(QMainWindow):
         # 3. Refresh UI
         self.refresh_watch_list_ui()
         self.on_role_changed("Master")
+
+    def append_watch_log(self, msg):
+        """[v27.10.77] Append a message to the Dashboard watch log panel."""
+        if hasattr(self, 'watch_log'):
+            self.watch_log.appendPlainText(msg)
+            # Auto-scroll to bottom
+            sb = self.watch_log.verticalScrollBar()
+            sb.setValue(sb.maximum())
+
     def on_watch_folder_detected(self, file_path, folder_name, is_repeat=False):
         """
         Triggered when WatchFolderEngine detects a new stable file.
@@ -4870,6 +4951,7 @@ class ModernTranscoderUI(QMainWindow):
         thread = WatchTaskCreationThread(file_path, folder_name, self, is_repeat)
         thread.placeholder_id = placeholder_id # Pass id
         thread.task_ready.connect(self.on_watch_task_ready)
+        thread.task_failed.connect(self.on_watch_task_probe_failed) # [v27.10.74]
         
         if not hasattr(self, '_watch_task_threads'): self._watch_task_threads = []
         # Cleanup old threads
@@ -4877,7 +4959,23 @@ class ModernTranscoderUI(QMainWindow):
         self._watch_task_threads.append(thread)
         thread.start()
 
-    def on_watch_task_ready(self, task_data):
+    def on_watch_task_probe_failed(self, placeholder_id):
+        """[v27.10.74] Called when WatchTaskCreationThread aborts/errors. Updates stuck placeholder."""
+        print(f"DEBUG_UI: Probe failed for placeholder {placeholder_id}. Cleaning up.")
+        if not placeholder_id: return
+        for i in range(self.auto_task_list.count()):
+            item = self.auto_task_list.item(i)
+            w = self.auto_task_list.itemWidget(item)
+            if not w: continue
+            wd = getattr(w, 'task_data', {})
+            if wd.get('placeholder_id') == placeholder_id:
+                wd['status'] = 'Failed'
+                wd['cluster_status'] = 'Failed'
+                if hasattr(w, 'lbl_status'):
+                    w.lbl_status.setText("探測失敗 (Probe Failed)")
+                    w.lbl_status.setStyleSheet("color: #ef5350; font-weight: bold;")
+                break
+
         """Called when background thread finishes metadata probe and deduplication."""
         source = task_data.get("source")
         if source:
@@ -5363,6 +5461,13 @@ class ModernTranscoderUI(QMainWindow):
                 if widget.progress.value() < 100:
                      widget.progress.setValue(100)
                 return
+
+            # [FIX] Force UI out of "Probing" state when remote node starts sending actual progress
+            if lbl and percent > 0 and ("探測中" in lbl.text() or "Probing" in lbl.text()):
+                lbl.setText("Transcoding...")
+                lbl.setStyleSheet("color: #4CAF50;")
+                widget.state = "running"
+
 
 
             if percent == -1: # Indeterminate
@@ -6232,6 +6337,10 @@ class ModernTranscoderUI(QMainWindow):
             elif status_check in ["Processing", "Transcoding"]:
                  if hasattr(existing_widget, 'set_started') and getattr(existing_widget, 'state', '') != 'running':
                       existing_widget.set_started()
+                 # [FIX] If the state was already running but text is stuck on Probing, force reset it
+                 elif hasattr(existing_widget, 'lbl_status') and ("探測中" in existing_widget.lbl_status.text() or "Probing" in existing_widget.lbl_status.text()):
+                      existing_widget.lbl_status.setText("Transcoding...")
+                      existing_widget.lbl_status.setStyleSheet("color: #4CAF50;")
             elif status_check in ["Failed", "Error"]:
                  err = task_data.get("error") or "Failed"
                  if hasattr(existing_widget, 'set_failed'):
