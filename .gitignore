@@ -14,10 +14,17 @@
 # Un-ignore project directories
 !core/
 !ui/
+!assets/
 
 # Un-ignore everything inside project directories
 !core/**
 !ui/**
+!assets/**
+
+# Un-ignore specific file types
+!*.spec
+!*.bat
+
 
 # Traditional ignores for project directories
 **/__pycache__/

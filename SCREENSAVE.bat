@@ -1,0 +1,1 @@
+@START /WAIT /MIN /LOW %windir%\system32\PhotoScreensaver.scr /s
