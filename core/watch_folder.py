@@ -9,7 +9,7 @@ class WatchFolderEngine(QThread):
     Automatically triggers transcoding based on folder-specific presets.
     Runs in a separate thread to prevent UI blocking.
     """
-    file_detected = Signal(str, str, bool) # file_path, folder_name, is_repeat
+    file_detected = Signal(str, str, bool, bool) # file_path, folder_name, is_repeat, is_qc_mode
     snapshot_ready = Signal(dict) # [NEW] Signal for async dashboard data
     log_message = Signal(str)    # [v27.10.77] Real-time log for Dashboard
 
@@ -38,6 +38,13 @@ class WatchFolderEngine(QThread):
     def request_snapshot(self):
         """Thread-safe request for a snapshot."""
         self._snapshot_requested = True
+
+    def force_scan(self):
+        """[v27.10.78] Force an immediate, fresh scan of all folders. Useful when a folder is freshly toggled 'On'."""
+        self._last_seen_mtimes.clear()
+        # Do not clear the persistent history or we'll process old files again,
+        # but clear the short-term session cache so it looks at the folders again.
+        self._seen_this_session.clear()
 
     def load_history(self):
         if os.path.exists(self.processed_db_path):
@@ -206,7 +213,8 @@ class WatchFolderEngine(QThread):
                         if self.is_file_ready(file_path):
                             self._log(f"[新檔] {filename}")
                             self._seen_this_session.add(file_path)
-                            self.file_detected.emit(file_path, wf.get("name", "WatchFolder"), is_history_repeat)
+                            is_qc = wf.get("qc_mode", False)
+                            self.file_detected.emit(file_path, wf.get("name", "WatchFolder"), is_history_repeat, is_qc)
                             # Update persistent history AFTER emit
                             self.processed_files[file_path] = current_mtime
                             self.save_history()

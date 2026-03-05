@@ -216,7 +216,7 @@ class StartupCheckDialog(QDialog):
         if not self.license_manager or self.current_stage != 2:
             return
         
-        allowed, status_msg, ids = self.license_manager.check_protection()
+        allowed, status_msg, ids, _ = self.license_manager.check_protection()
         if allowed:
             # Dongle detected!
             self.detection_timer.stop()

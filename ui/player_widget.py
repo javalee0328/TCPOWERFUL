@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                                QSlider, QLabel, QStyle, QSizePolicy, QFileDialog, QStackedLayout, QSpinBox, QStyleOptionSlider,
-                               QAbstractSpinBox, QToolButton)
+                               QAbstractSpinBox, QToolButton, QToolTip)
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtGui import QIcon, QAction, QPainter, QColor, QBrush, QPen, QFont, QLinearGradient, QPixmap, QImage, QPainterPath
@@ -333,6 +333,7 @@ class TrimSlider(QSlider):
         super().__init__(orientation, parent)
         self.mark_in = None
         self.mark_out = None
+        self.qc_markers = [] # List of ms timestamps
         self.duration = 0
 
     def set_markers(self, mark_in, mark_out, duration):
@@ -341,15 +342,52 @@ class TrimSlider(QSlider):
         self.duration = duration
         self.update()
 
+    def set_qc_markers(self, markers):
+        """Set a list of dictionaries [{'time': ms, 'label': str}] to show as anomaly markers"""
+        self.qc_markers = markers if markers else []
+        self.setMouseTracking(True)
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        if not self.qc_markers or self.duration <= 0: return
+        
+        pos_ratio = event.pos().x() / self.width()
+        hover_ms = int(pos_ratio * self.duration)
+        
+        tolerance = max(self.duration * 0.01, 500) # Give it 1% of duration or at least half a second hit area
+        
+        for m in self.qc_markers:
+            t = m["time"] if isinstance(m, dict) else m
+            label = m["label"] if isinstance(m, dict) else "QC Marker"
+            
+            if abs(hover_ms - t) < tolerance:
+                s = int(t / 1000)
+                time_str = f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}"
+                QToolTip.showText(event.globalPos(), f"{label} @ {time_str}", self)
+                return
+        QToolTip.hideText()
+
     def paintEvent(self, event):
         super().paintEvent(event)
         if self.duration <= 0: return
 
-        # Draw Trim Range
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         
-        # Calculate Geometry
+        y_pos = (self.height() // 2) - 2
+        
+        # 1. Draw QC Anomaly Markers (Orange dots)
+        if self.qc_markers:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(255, 152, 0)) # Orange
+            for m in self.qc_markers:
+                ms = m["time"] if isinstance(m, dict) else m
+                if 0 <= ms <= self.duration:
+                    x = int((ms / self.duration) * self.width())
+                    painter.drawEllipse(x - 2, y_pos - 6, 4, 4) # Small dot above the bar
+
+        # 2. Draw Trim Range
         in_x = 0
         out_x = self.width()
         
@@ -371,7 +409,6 @@ class TrimSlider(QSlider):
             width = max(0, out_x - in_x)
             
             # Draw Range Bar (Green Highlight)
-            y_pos = (self.height() // 2) - 2
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(0, 200, 83, 180)) # Green semi-transparent
             painter.drawRect(in_x, y_pos, width, 4)
@@ -410,6 +447,11 @@ class VideoPlayerWidget(QWidget):
         # self.float_timer.start(50) # [DISABLED] Only update on drag
         
         self._thread_pool = [] # Zombie thread keeper
+
+    def set_qc_markers(self, markers):
+        """Pass markers to the custom slider"""
+        if hasattr(self, 'slider'):
+            self.slider.set_qc_markers(markers)
 
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -533,6 +575,27 @@ class VideoPlayerWidget(QWidget):
         self.btn_clear_markers.clicked.connect(self.clear_in_out_points)
         bar_layout.addWidget(self.btn_clear_markers)
 
+        # QC Jump Buttons (Visible only when QC markers present)
+        self.btn_prev_qc = QToolButton()
+        self.btn_prev_qc.setIcon(self.create_geometric_icon("skip_back", "#FF9800", size=24)) 
+        self.btn_prev_qc.setIconSize(QSize(18, 18))
+        self.btn_prev_qc.setToolTip("上一個異常點 (Prev Anomaly)")
+        self.btn_prev_qc.setFixedSize(26, 26)
+        self.btn_prev_qc.setStyleSheet("QToolButton { background-color: transparent; border: 1px solid #FF9800; border-radius: 3px; } QToolButton:hover { background-color: #332200; border-color: #FFB74D; }")
+        self.btn_prev_qc.hide() 
+        self.btn_prev_qc.clicked.connect(self.jump_to_prev_qc)
+        bar_layout.addWidget(self.btn_prev_qc)
+
+        self.btn_next_qc = QToolButton()
+        self.btn_next_qc.setIcon(self.create_geometric_icon("skip_forward", "#FF9800", size=24))
+        self.btn_next_qc.setIconSize(QSize(18, 18))
+        self.btn_next_qc.setToolTip("下一個異常點 (Next Anomaly)")
+        self.btn_next_qc.setFixedSize(26, 26)
+        self.btn_next_qc.setStyleSheet("QToolButton { background-color: transparent; border: 1px solid #FF9800; border-radius: 3px; } QToolButton:hover { background-color: #332200; border-color: #FFB74D; }")
+        self.btn_next_qc.hide()
+        self.btn_next_qc.clicked.connect(self.jump_to_next_qc)
+        bar_layout.addWidget(self.btn_next_qc)
+
         # Timeline Slider
         self.slider = TrimSlider(Qt.Horizontal)
         self.slider.setCursor(Qt.PointingHandCursor)
@@ -577,6 +640,7 @@ class VideoPlayerWidget(QWidget):
 
         # Floating Time Label (Parented to self to float over everything including video bottom)
         self.lbl_float_time = FloatingTimeLabel(self)
+
 
 
         # 2. Side Panel (VU Meter)
@@ -637,8 +701,43 @@ class VideoPlayerWidget(QWidget):
         self.vu_timer = QTimer(self)
         self.vu_timer.timeout.connect(self.update_vu)
         self.vu_timer.start(20) # 50fps for smooth segments
-        
         self.vu_offset_ms = 120 # Reduced for tighter response
+
+    def set_qc_markers(self, markers_data):
+        """Pass QC marker timestamps to the UI components (like slider)"""
+        if hasattr(self, 'slider') and hasattr(self.slider, 'set_qc_markers'):
+            self.slider.set_qc_markers(markers_data)
+        self._cached_qc_markers = markers_data
+        
+        if hasattr(self, 'btn_prev_qc'):
+            if markers_data:
+                self.btn_prev_qc.show()
+                self.btn_next_qc.show()
+            else:
+                self.btn_prev_qc.hide()
+                self.btn_next_qc.hide()
+
+    def jump_to_prev_qc(self):
+        if not getattr(self, '_cached_qc_markers', None): return
+        current_ms = self.media_player.position()
+        prev_ms = 0
+        for m in reversed(self._cached_qc_markers):
+            t = m["time"] if isinstance(m, dict) else m
+            if t < current_ms - 500: # 500ms buffer so we don't get stuck on current marker
+                prev_ms = t
+                break
+        self.media_player.setPosition(prev_ms)
+
+    def jump_to_next_qc(self):
+        if not getattr(self, '_cached_qc_markers', None): return
+        current_ms = self.media_player.position()
+        next_ms = self.media_player.duration()
+        for m in self._cached_qc_markers:
+            t = m["time"] if isinstance(m, dict) else m
+            if t > current_ms + 500:
+                next_ms = t
+                break
+        self.media_player.setPosition(next_ms)
 
     def update_floating_time(self):
         # [MODIFIED] Only show if slider is being dragged
@@ -891,22 +990,31 @@ class VideoPlayerWidget(QWidget):
         dur_txt = self.format_time(dur) if dur > 0 else "--"
         
         # Update Trim Labels
-        self.lbl_in.setText(f"IN: {in_txt}{dirty_mark}")
-        set_style(self.lbl_in, self.in_point is not None)
-        
-        self.lbl_out.setText(f"OUT: {out_txt}{dirty_mark}")
-        set_style(self.lbl_out, self.out_point is not None)
+        if hasattr(self, 'lbl_in'):
+            self.lbl_in.setText(f"IN: {in_txt}{dirty_mark}")
+            set_style(self.lbl_in, self.in_point is not None)
+            
+        if hasattr(self, 'lbl_out'):
+            self.lbl_out.setText(f"OUT: {out_txt}{dirty_mark}")
+            set_style(self.lbl_out, self.out_point is not None)
         
         # [NEW] Force Slider Marker Update
         # Use slider maximum if duration() is not yet available (for responsiveness)
-        disp_dur = self.media_player.duration()
-        if disp_dur <= 0: disp_dur = self.slider.maximum()
+        disp_dur = 0
+        if hasattr(self, 'media_player') and self.media_player:
+            disp_dur = self.media_player.duration()
+            
+        if disp_dur <= 0: 
+            # Fallback to slider max if loaded
+            if hasattr(self, 'slider'):
+                disp_dur = self.slider.maximum()
         
-        if disp_dur > 0:
+        if disp_dur > 0 and hasattr(self, 'slider'):
             self.slider.set_markers(self.in_point, self.out_point, disp_dur)
         
-        self.lbl_dur.setText(f"DUR: {dur_txt}")
-        set_style(self.lbl_dur, dur > 0)
+        if hasattr(self, 'lbl_dur'):
+            self.lbl_dur.setText(f"DUR: {dur_txt}")
+            set_style(self.lbl_dur, dur > 0)
         
         # [NEW] Update button tooltips based on marker state
         # Only update if NOT playing result (result always shows 到頭/到尾)
@@ -990,10 +1098,11 @@ class VideoPlayerWidget(QWidget):
         
         # [NEW] Save current position before switching
         if self.current_file:
-             if self._paths_match(self.current_file, self.original_source) and not getattr(self, '_is_playing_result', False):
-                 self.source_position = self.media_player.position()
-             elif getattr(self, '_is_playing_result', False):
-                 self.result_position = self.media_player.position()
+             if hasattr(self, 'media_player') and self.media_player:
+                 if self._paths_match(self.current_file, self.original_source) and not getattr(self, '_is_playing_result', False):
+                     self.source_position = self.media_player.position()
+                 elif getattr(self, '_is_playing_result', False):
+                     self.result_position = self.media_player.position()
 
         target_pos = 0
         if not is_result:
@@ -1051,14 +1160,16 @@ class VideoPlayerWidget(QWidget):
                      z.wait(10)
         
         self.audio_levels = {} # Changed to Dict for sparse access
-        self.vu.setRealtime(False)
+        if hasattr(self, 'vu'):
+            self.vu.setRealtime(False)
         self._is_loading_new = True 
         
         # Use UniqueConnection to prevent duplicates without needing to disconnect first
-        try:
-            self.media_player.mediaStatusChanged.connect(self.on_media_status_changed, Qt.UniqueConnection)
-        except RuntimeError:
-            pass # Already connected
+        if hasattr(self, 'media_player') and self.media_player:
+            try:
+                self.media_player.mediaStatusChanged.connect(self.on_media_status_changed, Qt.UniqueConnection)
+            except RuntimeError:
+                pass # Already connected
         
         self.fps = 25.0
         self.fps_worker = FPSWorker(norm_path)
@@ -1075,18 +1186,23 @@ class VideoPlayerWidget(QWidget):
             self.set_in_out(None, None)
             
             # Update UI for Result View
-            self.btn_seek_in.setToolTip("回到開頭 (To Start)")
-            self.btn_seek_out.setToolTip("跳至結尾 (To End)")
+            if hasattr(self, 'btn_seek_in'):
+                self.btn_seek_in.setToolTip("回到開頭 (To Start)")
+            if hasattr(self, 'btn_seek_out'):
+                self.btn_seek_out.setToolTip("跳至結尾 (To End)")
             # [NEW] Set VU to Green
-            self.vu.set_color_mode("green")
+            if hasattr(self, 'vu'):
+                self.vu.set_color_mode("green")
         else:
             # Update UI for Source View
             # Tooltips will be set by update_trim_labels() based on marker state
             # [NEW] Set VU to Blue
-            self.vu.set_color_mode("blue")
+            if hasattr(self, 'vu'):
+                self.vu.set_color_mode("blue")
                 
-        self.media_player.setSource(QUrl.fromLocalFile(norm_path))
-        self.media_player.pause() # Ensure it starts paused
+        if hasattr(self, 'media_player') and self.media_player:
+            self.media_player.setSource(QUrl.fromLocalFile(norm_path))
+            self.media_player.pause() # Ensure it starts paused
 
     def set_in_out(self, in_point, out_point):
         """Set In/Out points programmatically and update UI"""
@@ -1095,25 +1211,29 @@ class VideoPlayerWidget(QWidget):
         self.update_trim_labels()
         
         # Update Slider Visualization
-        duration = self.media_player.duration()
-        if duration > 0:
-            self.slider.set_markers(in_point, out_point, duration)
-            
+        if hasattr(self, 'media_player') and self.media_player:
+            duration = self.media_player.duration()
+            if duration > 0 and hasattr(self, 'slider'):
+                self.slider.set_markers(in_point, out_point, duration)
+                
         # Update Buttons Tooltips & Icons to reflect state
-        if in_point is not None:
-             self.btn_seek_in.setToolTip(f"跳轉至入點 (Go to IN)\n{self.format_time(in_point)}")
-             self.btn_seek_in.setIcon(self.create_geometric_icon("skip_back", "#E0E0E0", size=24))
-        else:
-             self.btn_seek_in.setToolTip("回到開頭 (Go to Start)")
-             self.btn_seek_in.setIcon(self.create_geometric_icon("skip_back", "#E0E0E0", size=24)) # Same icon, different tip
+        if hasattr(self, 'btn_seek_in'):
+            if in_point is not None:
+                 self.btn_seek_in.setToolTip(f"跳轉至入點 (Go to IN)\n{self.format_time(in_point)}")
+                 self.btn_seek_in.setIcon(self.create_geometric_icon("skip_back", "#E0E0E0", size=24))
+            else:
+                 self.btn_seek_in.setToolTip("回到開頭 (Go to Start)")
+                 self.btn_seek_in.setIcon(self.create_geometric_icon("skip_back", "#E0E0E0", size=24)) # Same icon, different tip
 
-        if out_point is not None:
-             self.btn_seek_out.setToolTip(f"跳轉至出點 (Go to OUT)\n{self.format_time(out_point)}")
-        else:
-             self.btn_seek_out.setToolTip("跳至結尾 (Go to End)")
-            
+        if hasattr(self, 'btn_seek_out'):
+            if out_point is not None:
+                 self.btn_seek_out.setToolTip(f"跳轉至出點 (Go to OUT)\n{self.format_time(out_point)}")
+            else:
+                 self.btn_seek_out.setToolTip("跳至結尾 (Go to End)")
+                
         # Ensure we are in paused state to show exact frame
-        self.media_player.pause()
+        if hasattr(self, 'media_player') and self.media_player:
+            self.media_player.pause()
 
     def _paths_match(self, p1, p2):
         if not p1 or not p2: return False
@@ -1282,9 +1402,10 @@ class VideoPlayerWidget(QWidget):
         
     def set_vu_offset(self, value):
         self.vu_offset_ms = value
-        was_blocked = self.sb_vu_offset.blockSignals(True)
-        self.sb_vu_offset.setValue(value)
-        self.sb_vu_offset.blockSignals(was_blocked)
+        if hasattr(self, 'sb_vu_offset'):
+            was_blocked = self.sb_vu_offset.blockSignals(True)
+            self.sb_vu_offset.setValue(value)
+            self.sb_vu_offset.blockSignals(was_blocked)
 
     def get_vu_offset(self):
         return getattr(self, 'vu_offset_ms', 150)
@@ -1386,6 +1507,10 @@ class VideoPlayerWidget(QWidget):
         # [NEW] Refresh Markers if points were set before duration was known
         if duration > 0:
             self.slider.set_markers(self.in_point, self.out_point, duration)
+            # Re-apply QC markers once duration is known so paintEvent can calculate X coordinates
+            if hasattr(self, '_cached_qc_markers') and self._cached_qc_markers:
+                self.slider.set_qc_markers(self._cached_qc_markers)
+        
         
     def _on_media_ready(self, status):
         pass

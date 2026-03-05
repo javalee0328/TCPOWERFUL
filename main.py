@@ -178,7 +178,13 @@ if __name__ == "__main__":
         # Stage 2: Dongle Detection with Auto-Detection
         startup_dlg.set_stage_2(lm)  # Pass LicenseManager for auto-detection
         # Initial check
-        allowed, status_msg, ids = lm.check_protection()
+        try:
+            allowed, status_msg, ids, _ = lm.check_protection()
+        except Exception as e:
+            debug_log(f"Error during license check: {e}")
+            allowed = False
+            status_msg = f"License check failed: {e}"
+            ids = []
         
         if allowed:
             # Dongle already present

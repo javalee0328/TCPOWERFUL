@@ -104,7 +104,8 @@ class LicenseManager:
         if sentinels:
              for instance_id, friendly_name in sentinels:
                  checked_ids.append(f"Dongle: {friendly_name} ({instance_id})")
-             return True, "SafeNet Dongle Detected (Access Granted)", checked_ids
+             # Hardware dongle grants all features by default
+             return True, "SafeNet Dongle Detected (Access Granted)", checked_ids, {"qc_enabled": True}
 
         # 2. Check Removable Drives (License File)
         drives = self.get_removable_drives()
@@ -117,9 +118,55 @@ class LicenseManager:
             
             is_valid, msg, meta = self.verify_license_file(license_path, serial)
             if is_valid:
-                return True, f"Welcome {meta.get('client_name', 'User')}", checked_ids
+                features = meta.get('features', {})
+                return True, f"Welcome {meta.get('client_name', 'User')}", checked_ids, features
 
-        return False, "未偵測到加密鎖或授權檔案 (No Dongle or License Found)", checked_ids
+        return False, "未偵測到加密鎖或授權檔案 (No Dongle or License Found)", checked_ids, {}
+
+    def has_qc_license(self, force_check=False):
+        """
+        Checks if the currently attached license has the QC feature enabled.
+        SafeNet dongles have full access by default. 
+        File licenses must have 'qc_enabled': True in their features dict.
+        """
+        # Sentinel dongle overrides and grants full access
+        if self.get_sentinel_devices():
+             return True
+             
+        # Check USB Drive licenses for explicit QC flag
+        drives = self.get_removable_drives()
+        for drive in drives:
+            serial = self.get_volume_serial(drive)
+            if not serial: continue
+            
+            license_path = os.path.join(drive, "license.dat")
+            is_valid, _, meta = self.verify_license_file(license_path, serial)
+            if is_valid and meta and meta.get('features', {}).get('qc_enabled', False):
+                return True
+                
+        return False
+
+    def has_transcode_license(self, force_check=False):
+        """
+        Checks if the currently attached license has the standard transcode feature enabled.
+        SafeNet dongles have full access by default. 
+        File licenses default to True if missing, or must explicitly have 'transcode_enabled': True.
+        """
+        if self.get_sentinel_devices():
+             return True
+             
+        drives = self.get_removable_drives()
+        for drive in drives:
+            serial = self.get_volume_serial(drive)
+            if not serial: continue
+            
+            license_path = os.path.join(drive, "license.dat")
+            is_valid, _, meta = self.verify_license_file(license_path, serial)
+            if is_valid and meta:
+                # Default to True for backward compatibility with older license files
+                return meta.get('features', {}).get('transcode_enabled', True)
+                
+        return False
 
     def get_sentinel_devices(self):
         """Returns a list of connected SafeNet/Sentinel devices (InstanceIDs)."""
@@ -156,7 +203,8 @@ class LicenseManager:
 if __name__ == "__main__":
     # Test Run
     lm = LicenseManager()
-    allowed, msg, ids = lm.check_protection()
+    allowed, msg, ids, features = lm.check_protection()
     print(f"Allowed: {allowed}")
     print(f"Status: {msg}")
     print(f"IDs Checked: {ids}")
+    print(f"QC Enabled: {lm.has_qc_license()}")

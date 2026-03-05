@@ -21,6 +21,8 @@ from core.metadata import get_video_metadata
 from core.preset_data import PRESETS
 from core.watch_folder import WatchFolderEngine
 from core.cluster_manager import ClusterManager
+from core.qc_analyzer import BroadcastQC
+from core.qc_report_builder import QCReportBuilder
 
 import subprocess
 import logging
@@ -150,6 +152,58 @@ class TranscodeWorker(QThread):
             except:
                 pass
 
+class QCWorker(QThread):
+    progress_signal = Signal(int, str)
+    finished_signal = Signal(bool, str)
+
+    def __init__(self, target_file, output_pdf_path, task_ref=None):
+        super().__init__()
+        self.target_file = target_file
+        self.output_pdf_path = output_pdf_path
+        self.task_ref = task_ref or {}
+        self.killed = False
+
+    def run(self):
+        try:
+            self.progress_signal.emit(10, "分析中 (Analyzing)...")
+            if self.killed: return
+            analyzer = BroadcastQC()
+            qc_data = analyzer.analyze(self.target_file)
+            
+            if self.killed: return
+            self.progress_signal.emit(70, "產生報告總表 (Generating Batch PDF)...")
+            # Removed individual QCReportBuilder generation per user request
+            
+            if self.killed: return
+            from core.qc_batch_reporter import QCBatchReporter
+            
+            # [NEW] Store full QC results back into task for UI consumption
+            self.task_ref["qc_data"] = qc_data
+            
+            anomalies = qc_data.get("anomalies", [])
+            
+            # [NEW] Batch Reporting Strategy: Append to Daily CSV and Trigger Batch PDF
+            # Use output_dir for the batch report location
+            report_dir = os.path.dirname(self.output_pdf_path)
+            QCBatchReporter.append_to_daily_report(report_dir, qc_data)
+            
+            if anomalies:
+                self.finished_signal.emit(True, f"QC 警告 (Warning): 發現 {len(anomalies)} 處異常")
+            else:
+                self.finished_signal.emit(True, f"檢測通過 (Pass)")
+                
+        except Exception as e:
+            self.finished_signal.emit(False, f"QC 失敗 (Failed): {str(e)}")
+
+    def stop(self):
+        self.killed = True
+    def kill(self):
+        self.killed = True
+    def pause(self):
+        pass
+    def resume(self):
+        pass
+
 class DongleCheckThread(QThread):
     """Background hardware lock check to prevent UI stuttering."""
     result_ready = Signal(bool, str, list) # allowed, msg, ids
@@ -158,7 +212,7 @@ class DongleCheckThread(QThread):
         try:
             from core.security import LicenseManager
             lm = LicenseManager()
-            allowed, msg, ids = lm.check_protection()
+            allowed, msg, ids, _ = lm.check_protection()
             self.result_ready.emit(allowed, msg, ids)
         except Exception as e:
             self.result_ready.emit(False, str(e), [])
@@ -168,12 +222,13 @@ class WatchTaskCreationThread(QThread):
     task_ready = Signal(dict)
     task_failed = Signal(str) # [v27.10.74] Signal placeholder_id to unblock stuck UI
     
-    def __init__(self, file_path, folder_name, parent_ui, is_repeat=False):
+    def __init__(self, file_path, folder_name, parent_ui, is_repeat=False, is_qc=False):
         super().__init__()
         self.file_path = file_path
         self.folder_name = folder_name
         self.parent_ui = parent_ui
         self.is_repeat = is_repeat
+        self.is_qc = is_qc
         
     def run(self):
         try:
@@ -231,8 +286,8 @@ class WatchTaskCreationThread(QThread):
                 "source_path": self.file_path,
                 "base_name": base_name,
                 "size": os.path.getsize(self.file_path) if os.path.exists(self.file_path) else 0,
-                "duration": meta.get("duration", 0),
-                "audio_layout": meta.get("audio_layout", "Stereo"),
+                "duration": meta.get("duration", 0) if meta else 0,
+                "audio_layout": meta.get("audio_layout", "Stereo") if meta else "Stereo",
                 "vcodec": preset_data.get("vcodec", "h264"),
                 "container": preset_data.get("container", "mp4"),
                 "bitrate": preset_data.get("bitrate", "5000"),
@@ -241,16 +296,20 @@ class WatchTaskCreationThread(QThread):
                 "fps": preset_data.get("fps"),
                 "audio_ch": preset_data.get("audio_ch"),
                 "in_point": 0,
-                "out_point": int(meta.get("duration", 0) * 1000),
+                "out_point": int(meta.get("duration", 0) * 1000) if meta else 0,
                 "source_type": f"Watch:{self.folder_name}",
                 "status": "Pending",
                 "cluster_status": "Pending",
+                "is_qc_mode": self.is_qc,
+                "qc_mode": self.is_qc,
+                "action": "QC" if self.is_qc else "Transcode",
                 "placeholder_id": getattr(self, 'placeholder_id', self.file_path)
             }
             self.task_ready.emit(task_data)
         except Exception as e:
             print(f"DEBUG_THREAD: WatchTaskCreationThread Error: {e}")
-            self.task_failed.emit(getattr(self, 'placeholder_id', '')) # [v27.10.74] Unblock placeholder
+            if hasattr(self, 'task_failed'):
+                self.task_failed.emit(getattr(self, 'placeholder_id', ''))
 
 class SmartFailureDialog(QDialog):
     """Professional dialog to translate technical errors into actionable solutions."""
@@ -327,13 +386,29 @@ class SmartFailureDialog(QDialog):
 # [NEW] Custom Widget for Watch Folder List
 
 class PresetSelectorDialog(QDialog):
-    def __init__(self, parent=None, initial_selection=None):
+    def __init__(self, parent=None, initial_selection=None, is_qc=False):
         super().__init__(parent)
         self.setWindowTitle("選擇監控轉碼目標格式")
         self.setMinimumSize(450, 600)
         self.selected_preset = None
         
         layout = QVBoxLayout(self)
+        
+        self.chk_qc = QCheckBox("啟用廣播級 QC 檢測 (QC Only - No Transcoding)")
+        self.chk_qc.setStyleSheet("color: #e91e63; font-weight: bold; margin-bottom: 5px;")
+        
+        try:
+            from core.security import LicenseManager
+            lm = LicenseManager()
+            if not lm.has_qc_license():
+                self.chk_qc.setEnabled(False)
+                self.chk_qc.setToolTip("需要專屬 QC 授權才能啟用此功能 (QC License Required)")
+            else:
+                self.chk_qc.setChecked(is_qc)
+        except Exception:
+            pass
+            
+        layout.addWidget(self.chk_qc)
         
         title = QLabel("請選擇該資料夾對應的格式:")
         title.setStyleSheet("font-weight: bold; font-size: 14px; margin-bottom: 5px;")
@@ -344,6 +419,7 @@ class PresetSelectorDialog(QDialog):
             QListWidget { background-color: #f5f5f5; color: #333; font-size: 13px; border: 1px solid #ccc; }
             QListWidget::item { padding: 10px; border-bottom: 1px solid #eee; }
             QListWidget::item:selected { background-color: #0078d4; color: white; }
+            QListWidget:disabled { background-color: #dcdcdc; color: #888; }
         """)
         
         # Load Presets
@@ -363,6 +439,11 @@ class PresetSelectorDialog(QDialog):
         self.search_edit.textChanged.connect(self.filter_list)
         layout.addWidget(self.search_edit)
         
+        # Connect QC checkbox to list toggle
+        self.chk_qc.stateChanged.connect(self.on_qc_toggled)
+        # Trigger initial state
+        self.on_qc_toggled(Qt.Checked if self.chk_qc.isChecked() else Qt.Unchecked)
+        
         btn_layout = QHBoxLayout()
         btn_ok = QPushButton("確認選擇 (OK)")
         btn_ok.setMinimumHeight(40)
@@ -379,14 +460,31 @@ class PresetSelectorDialog(QDialog):
         
         self.list_widget.itemDoubleClicked.connect(lambda: self.accept())
 
+    def accept(self):
+        if not self.chk_qc.isChecked() and not self.list_widget.currentItem():
+             QMessageBox.warning(self, "錯誤", "請選擇一個轉碼格式，或啟用 QC 檢測模式！\n(Please select a preset or enable QC)")
+             return
+        super().accept()
+
     def filter_list(self, text):
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
             item.setHidden(text.lower() not in item.text().lower())
 
+    def on_qc_toggled(self, state):
+        is_checked = state == Qt.Checked
+        self.list_widget.setEnabled(not is_checked)
+        self.search_edit.setEnabled(not is_checked)
+
     def get_selection(self):
+        if self.chk_qc.isChecked():
+            return "QC_ONLY"
+            
         curr = self.list_widget.currentItem()
         return curr.text() if curr else None
+        
+    def is_qc_enabled(self):
+        return self.chk_qc.isChecked()
 
 class WatchFolderRowWidget(QWidget):
     def __init__(self, folder_data, index, parent_controller):
@@ -405,9 +503,14 @@ class WatchFolderRowWidget(QWidget):
         name_lbl.setStyleSheet("font-weight: bold; color: #E0E0E0; font-size: 14px;")
         path_lbl = QLabel(f"{folder_data.get('path')}")
         path_lbl.setStyleSheet("color: #888; font-size: 11px;")
-        preset_lbl = QLabel(f"Preset: {folder_data.get('preset')}")
-        preset_lbl.setStyleSheet("color: #4CAF50; font-size: 11px;")
         
+        if folder_data.get("qc_mode"):
+            preset_lbl = QLabel("🎯 廣播級 QC 檢測 (Broadcast QC Only)")
+            preset_lbl.setStyleSheet("color: #e91e63; font-weight: bold; font-size: 11px;")
+        else:
+            preset_lbl = QLabel(f"Preset: {folder_data.get('preset')}")
+            preset_lbl.setStyleSheet("color: #4CAF50; font-size: 11px;")
+            
         info_layout.addWidget(name_lbl)
         info_layout.addWidget(path_lbl)
         info_layout.addWidget(preset_lbl)
@@ -466,6 +569,65 @@ class WatchFolderRowWidget(QWidget):
     def on_toggle_clicked(self):
         new_state = not self.is_enabled
         self.controller.toggle_watch_folder(self.index, new_state)
+
+class MaterialInfoDialog(QDialog):
+    def __init__(self, qc_data, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("素材基本信息")
+        self.setFixedSize(500, 250)
+        self.setStyleSheet("background-color: #f0f0f0; color: #222; font-family: 'Microsoft JhengHei', sans-serif;")
+        
+        main_layout = QVBoxLayout(self)
+        
+        info = qc_data.get("info", {})
+        def g(key, default=""): return str(info.get(key, default))
+        
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        
+        # 3 columns, 6 physical columns (label, value) x 7 rows
+        data = [
+            [("檔案名", qc_data.get("file", "Unknown")), ("TC首格", g('start_tc')), ("時長", g('duration_str'))],
+            [("解析度", g("video_resolution")), ("顏色取樣", g("color_sampling")), ("碼率", g("bitrate_mbps"))],
+            [("影片編碼", g("video_codec")), ("封裝格式", g("format_name")), ("dropframe", g("dropframe"))],
+            [("聲音編碼", g("audio_codec")), ("聲道數", g("audio_channels")), ("修改時間", g("mod_time"))],
+            [("掃瞄方式", g("scan_type")), ("顯示比例", g("aspect_ratio")), ("創建時間", g("create_time"))],
+            [("幀率", g("fps")), ("AFD", g("afd")), ("檔案大小", g("size_mb"))],
+            [("色域", g("color_primaries")), ("高動態範圍", g("color_transfer")), ("音頻採樣率", g("audio_sample_rate"))],
+        ]
+        
+        for row, cols in enumerate(data):
+            for col_idx, (lbl_text, val_text) in enumerate(cols):
+                lbl = QLabel(lbl_text)
+                lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                lbl.setStyleSheet("color: #444; font-size: 13px;")
+                
+                # Make empty dropframe label invisible but keep layout
+                if lbl_text == "dropframe" and not val_text:
+                    lbl.setText("")
+                
+                val = QLineEdit(val_text)
+                val.setReadOnly(True)
+                val.setStyleSheet("""
+                    QLineEdit {
+                        background-color: #ffffff;
+                        border: 1px solid #ccc;
+                        padding: 2px 4px;
+                        color: #111;
+                        font-size: 13px;
+                    }
+                """)
+                # Base column index is col_idx * 2
+                grid.addWidget(lbl, row, col_idx * 2)
+                grid.addWidget(val, row, col_idx * 2 + 1)
+                
+        main_layout.addLayout(grid)
+        
+        btn_box = QDialogButtonBox(QDialogButtonBox.Close)
+        btn_box.rejected.connect(self.reject)
+        # Style the buttons to look standard Windows
+        btn_box.setStyleSheet("QPushButton { background-color: #e1e1e1; border: 1px solid #adadad; padding: 4px 12px; min-width: 60px; color: black; } QPushButton:hover { background-color: #e5f1fb; border-color: #0078d7; }")
+        main_layout.addWidget(btn_box, alignment=Qt.AlignCenter)
 
 class ClusterNodeRowWidget(QWidget):
     def __init__(self, node_id, data, is_local=False):
@@ -766,6 +928,15 @@ class TaskProgressWidget(QWidget):
         self.btn_open_folder.setStyleSheet(self.get_btn_style("transparent"))
         self.btn_open_folder.clicked.connect(self.open_folder)
         btns_layout.addWidget(self.btn_open_folder)
+        
+        self.btn_info = QToolButton()
+        self.btn_info.setFixedSize(26, 26)
+        self.btn_info.setIcon(self.create_geometric_icon("info", size=20))
+        self.btn_info.setToolTip("素材基本信息 (Material Info)")
+        self.btn_info.hide()
+        self.btn_info.setStyleSheet(self.get_btn_style("transparent"))
+        self.btn_info.clicked.connect(self.show_material_info)
+        btns_layout.addWidget(self.btn_info)
 
         self.btn_cancel = QToolButton()
         self.btn_cancel.setFixedSize(26, 26)
@@ -859,6 +1030,12 @@ class TaskProgressWidget(QWidget):
         
         self.btn_open_folder.show()
         
+        # [NEW] Show Info button if task data exists 
+        if self.task_data and self.task_data.get('action') == 'QC' and 'qc_metrics' in self.task_data:
+            self.btn_info.show()
+        elif self.task_data and getattr(self, 'qc_data', None):
+            self.btn_info.show()
+            
         # Reset Cancel Button to Close style
         self.btn_cancel.setFixedSize(30, 30)
         self.btn_cancel.setIconSize(QSize(24, 24))
@@ -1003,6 +1180,36 @@ class TaskProgressWidget(QWidget):
         
         self.state = "pending" # FIX: Set to pending, NOT done
 
+    def open_folder(self):
+        folder = os.path.dirname(self.output_path)
+        if hasattr(self, 'task_data') and self.task_data:
+             if self.task_data.get('action') == 'QC':
+                  # For QC, the output path is actually the PDF report. 
+                  # Open the PDF directly, or its folder.
+                  if self.output_path.endswith('.pdf') and os.path.exists(self.output_path):
+                       try: os.startfile(self.output_path)
+                       except: os.startfile(folder)
+                       return
+        if os.path.exists(folder):
+            try: os.startfile(folder)
+            except: pass
+
+    def show_material_info(self):
+        """Displays the Material Info dialog for QC tasks"""
+        if not self.task_data: return
+        
+        qc_data = None
+        # Tasks from UI session
+        if hasattr(self, 'qc_data') and self.qc_data:
+            qc_data = self.qc_data
+        # Tasks from Batch Reporter
+        elif self.task_data.get('qc_metrics') and isinstance(self.task_data.get('qc_metrics'), dict):
+            # Formulate enough data for the dialog to read
+            qc_data = {"file": self.task_data.get("name"), "info": self.task_data.get("qc_metrics")}
+            
+        if qc_data:
+            dlg = MaterialInfoDialog(qc_data, self)
+            dlg.exec()
 
     def toggle_transcode(self):
         state = getattr(self, 'state', 'pending') # Get current state, default to 'pending'
@@ -1024,7 +1231,10 @@ class TaskProgressWidget(QWidget):
             self.state = 'running'
             self.btn_transcode.setIcon(self.create_geometric_icon("pause", "#40C4FF", size=24))
             self.btn_transcode.setToolTip("暫停轉碼 (Pause)")
-            self.lbl_status.setText("Transcoding...")
+            
+            is_qc = getattr(self, 'task_data', {}).get('action') == 'QC' or getattr(self, 'task_data', {}).get('qc_mode')
+            self.lbl_status.setText("QC中" if is_qc else "轉碼中")
+            
             self.lbl_status.setStyleSheet("color: #4CAF50;")
             
         else:
@@ -1037,7 +1247,10 @@ class TaskProgressWidget(QWidget):
         self.start_time = QTime.currentTime()
         t_str = self.start_time.toString("HH:mm:ss")
         self.lbl_time_range.setText(t_str)
-        self.lbl_status.setText("Transcoding...")
+        
+        is_qc = getattr(self, 'task_data', {}).get('action') == 'QC' or getattr(self, 'task_data', {}).get('qc_mode')
+        self.lbl_status.setText("QC中" if is_qc else "轉碼中")
+        
         self.lbl_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
         self.btn_transcode.setIcon(self.create_geometric_icon("pause", "#40C4FF", size=24)) 
         self.btn_transcode.setToolTip("暫停轉碼 (Pause)")
@@ -1111,6 +1324,69 @@ class TaskProgressWidget(QWidget):
         self.last_seen_percent = self.progress.value()
         
         if self.player_ref:
+            # [NEW] Special Logic for QC Tasks: Play SOURCE with MARKERS
+            is_qc = self.task_data.get("is_qc_mode") or self.task_data.get("is_qc")
+            if is_qc:
+                source = self.task_data.get("source")
+                
+                # [NEW] Watch Folder Auto-Archive Fallback
+                # If the file was moved to DONE/ERROR after completion, the old path might still be in task_data
+                if source and not os.path.exists(source):
+                    src_dir = os.path.dirname(source)
+                    base_name = os.path.basename(source)
+                    # Check DONE folder
+                    done_path = os.path.join(src_dir, "DONE", base_name)
+                    # If it was renamed with a timestamp, we must search for a matching base name
+                    if not os.path.exists(done_path):
+                        done_dir = os.path.join(src_dir, "DONE")
+                        if os.path.exists(done_dir):
+                            name_no_ext, ext = os.path.splitext(base_name)
+                            for f in os.listdir(done_dir):
+                                if f.startswith(name_no_ext + "_") and f.endswith(ext):
+                                    done_path = os.path.join(done_dir, f)
+                                    break
+                    if os.path.exists(done_path):
+                        source = done_path
+                
+                if not source or not os.path.exists(source):
+                    QMessageBox.warning(None, "錯誤", f"找不到影片原檔，無法播放\n預期路徑: {source}")
+                    return
+                
+                # Extract Markers from qc_data
+                markers_data = []
+                qc_data = self.task_data.get("qc_data", {})
+                if not qc_data and self.task_data.get("qc_metrics"):
+                    qc_data = {"anomalies": self.task_data.get("qc_metrics", {}).get("anomalies", [])}
+                    
+                anomalies = qc_data.get("anomalies", [])
+                for a in anomalies:
+                    # Depending on anomaly type, time might be in "time" or "start"
+                    t_sec = a.get("time")
+                    if t_sec is None:
+                        t_sec = a.get("start")
+                        
+                    if t_sec is not None:
+                        # Translate some common types to Chinese or readable
+                        a_type = a.get("type", "Error")
+                        desc = f"異常: {a_type}"
+                        if "silence" in a_type.lower(): desc = "靜音 (Silence)"
+                        elif "freeze" in a_type.lower(): desc = "畫面停滯 (Freeze)"
+                        elif "black" in a_type.lower(): desc = "黑畫面 (Black)"
+                        elif "error" in a_type.lower(): desc = "解碼錯誤 (Decode Error)"
+                        
+                        markers_data.append({
+                            "time": int(t_sec * 1000.0),
+                            "label": desc
+                        })
+                
+                # Load Source with Markers
+                self.player_ref.load_video(source, is_result=False, start_pos=0)
+                self.player_ref.set_qc_markers(markers_data)
+                self.player_ref.setFocus()
+                self.switch_page_requested.emit()
+                return
+
+            # Standard Logic for Transcode results
             if self.player_ref.current_file and os.path.normpath(self.player_ref.current_file) == os.path.normpath(self.output_path):
                  self.player_ref.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_F5, Qt.NoModifier))
             else:
@@ -1201,13 +1477,36 @@ class TaskProgressWidget(QWidget):
     def open_folder(self):
         # [MODIFIED] Logic to open _DONE folder for Watch Folder Tasks
         # [MODIFIED v27.5] Open Target File Folder
-        target_path = self.output_path or (self.task_data.get("output_path") if self.task_data else None)
+        target_path = self.output_path or (self.task_data.get("target_path") if self.task_data else None)
         if not target_path or target_path == "-":
              # Fallback to source dir if output not yet known
              if self.task_data and self.task_data.get("source"):
                  target_path = self.task_data.get("source")
              else:
                  return
+
+        is_qc = self.task_data.get("is_qc_mode") or self.task_data.get("is_qc")
+        
+        # [NEW] Special Logic for QC: Open Batch PDF Report directly
+        if is_qc:
+            from datetime import datetime
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            # Usually target_path is the .pdf path, so the folder is its dirname
+            folder_path = os.path.dirname(target_path) if target_path.lower().endswith(".pdf") else target_path
+            
+            # Watch folder tasks might have moved to DONE
+            if not os.path.exists(folder_path) and getattr(self, "task_data", None):
+                src = self.task_data.get("source")
+                if src and os.path.exists(os.path.dirname(src)):
+                    folder_path = os.path.dirname(src)
+                    
+            batch_pdf = os.path.join(folder_path, f"QC_Batch_Report_{date_str}.pdf")
+            if os.path.exists(batch_pdf):
+                try:
+                    os.startfile(os.path.normpath(batch_pdf))
+                    return
+                except:
+                    pass
 
         folder_path = os.path.dirname(target_path)
         if os.path.exists(folder_path):
@@ -1430,9 +1729,11 @@ class ModernTranscoderUI(QMainWindow):
             try: self.cluster_timer.stop()
             except: pass
         
-        # 2. Stop Watch Folder Engine
+        # 2. Stop Watch Folder Engine gracefully
         if hasattr(self, 'watch_engine'):
-            try: self.watch_engine.stop()
+            try: 
+                self.watch_engine.stop()
+                self.watch_engine.wait(2000) # Give thread time to finish current scan loop before destroying QThread
             except: pass
         
         # 3. Kill all active TranscodeWorkers (releases ffmpeg subprocess handles)
@@ -2103,22 +2404,11 @@ class ModernTranscoderUI(QMainWindow):
         cl_path_layout.addWidget(btn_browse_cl)
         s_form.addLayout(cl_path_layout, 0, 1)
         
-        # [NEW] Parallel Tasks Control
-        s_form.addWidget(QLabel("最大同時轉碼數量 (Max Parallel):"), 1, 0)
-        parallel_layout = QHBoxLayout()
-        self.spin_parallel = QSpinBox()
-        self.spin_parallel.setRange(1, 16)
-        suggested = self.settings.get("max_parallel_tasks", 1)
-        self.spin_parallel.setValue(suggested)
-        parallel_layout.addWidget(self.spin_parallel)
-        
-        btn_suggest = QPushButton("硬體建議 (Suggest)")
-        btn_suggest.clicked.connect(self.apply_recommended_concurrency)
-        parallel_layout.addWidget(btn_suggest)
-        s_form.addLayout(parallel_layout, 1, 1)
+        # [REMOVED] Parallel Tasks Control moved to main dashboard in v27.10.77
+        # The node alias row is now at row 1 instead of 2.
         
         # [NEW] Node Alias
-        s_form.addWidget(QLabel("節點名稱 (Node Alias):"), 2, 0)
+        s_form.addWidget(QLabel("節點名稱 (Node Alias):"), 1, 0)
         self.edit_node_alias = QLineEdit()
         self.edit_node_alias.setPlaceholderText("例如: MASTER-PC, WORKER-01")
         self.edit_node_alias.setText(self.settings.get("worker_alias", ""))
@@ -2470,8 +2760,16 @@ class ModernTranscoderUI(QMainWindow):
         btn_layout.addWidget(lbl_all)
         btn_layout.addWidget(lbl_icon)
         btn_layout.addStretch()
-        
         self.btn_add_all.clicked.connect(self.add_all_to_queue)
+        
+        # Check Transcoder License for UI enabling
+        from core.security import LicenseManager
+        lm = LicenseManager()
+        has_tc_license = lm.has_transcode_license()
+        if not has_tc_license:
+            self.btn_add_all.setEnabled(False)
+            self.btn_add_all.setToolTip("需要標準轉碼模組授權 (Transcoder License Required)")
+        
         pl_ctrl.addWidget(self.btn_add_all)
         
         # btn_add removed as per user request (Duplicate of Source Button)
@@ -2497,6 +2795,32 @@ class ModernTranscoderUI(QMainWindow):
             QToolButton:pressed { background-color: #b71c1c; }
         """)
         btn_clear.clicked.connect(self.clear_playlist)
+        
+        if not has_tc_license:
+            btn_clear.setEnabled(False)
+        
+        # Concurrency SpinBox (Moved from Cluster Settings)
+        pl_ctrl.addWidget(QLabel(" MAX:"))
+        self.spin_parallel = QSpinBox()
+        self.spin_parallel.setRange(1, 16)
+        suggested = self.settings.get("max_parallel_tasks", 1)
+        self.spin_parallel.setValue(suggested)
+        self.spin_parallel.setToolTip("最大同時處理數量 (Max Concurrent Tasks)")
+        self.spin_parallel.setFixedWidth(50)
+        self.spin_parallel.setFixedHeight(30)
+        self.spin_parallel.setStyleSheet("""
+            QSpinBox {
+                background-color: #2a2a2a;
+                color: #F0E68C;
+                font-weight: bold;
+                font-size: 14px;
+                border: 1px solid #555;
+                border-radius: 4px;
+            }
+        """)
+        # Immediate save and logic update
+        self.spin_parallel.valueChanged.connect(lambda val: self.settings.set("max_parallel_tasks", val))
+        pl_ctrl.addWidget(self.spin_parallel)
         
         # pl_ctrl.addWidget(btn_add) # Removed
         pl_ctrl.addWidget(btn_clear)
@@ -2529,6 +2853,12 @@ class ModernTranscoderUI(QMainWindow):
             }
         """)
         self.playlist.itemPressed.connect(self.on_playlist_item_clicked)
+        
+        if not has_tc_license:
+            self.playlist.setEnabled(False)
+            lbl_pl_header.setText(lbl_pl_header.text() + " [授權未啟用]")
+            lbl_pl_header.setStyleSheet("color: #777; font-weight: bold; font-size: 15px;")
+            
         self.params_layout.addWidget(self.playlist, 1)
         
         # --- Target Settings ---
@@ -3550,6 +3880,7 @@ class ModernTranscoderUI(QMainWindow):
         
         # Track if anything was actually removed
         removed_count = 0
+        paths_to_clear = []
         
         def do_purge(list_widget, force_all=False):
             nonlocal removed_count
@@ -3594,6 +3925,11 @@ class ModernTranscoderUI(QMainWindow):
                         task_id = self.get_task_identifier(widget.task_data)
                         self.mark_task_as_cleared(task_id)
 
+                    # Keep track of paths removed from auto_task_list so the watch folder forgets them
+                    path = widget.task_data.get("source") or widget.task_data.get("source_path")
+                    if path and list_widget == self.auto_task_list:
+                        paths_to_clear.append(path)
+
                     list_widget.takeItem(i)
                     removed_count += 1
 
@@ -3617,6 +3953,10 @@ class ModernTranscoderUI(QMainWindow):
                     debug_log("Stage 2 Clear: Wiped all residue task/lock files from cluster storage.")
             except Exception as e:
                 debug_log(f"Stage 2 Clear residue error: {e}")
+
+        # Tell WatchEngine to forget these paths so they don't immediately respawn if still in folder
+        if paths_to_clear and hasattr(self, 'watch_engine') and self.watch_engine:
+            self.watch_engine.clear_history_for_paths(paths_to_clear)
 
         # Update Settings
         self.settings.set("dismissed_dashboard_items", dismissed[-800:])
@@ -4250,7 +4590,10 @@ class ModernTranscoderUI(QMainWindow):
                 # [NEW] Update widget to show "Processing" immediately
                 widget = task.get("widget")
                 if widget:
-                    widget.lbl_status.setText("Processing")
+                    if task.get("is_qc_mode"):
+                        widget.lbl_status.setText("QC中")
+                    else:
+                        widget.lbl_status.setText("轉碼中")
                     widget.lbl_status.setStyleSheet("color: #ffd54f; font-weight: bold;")
                     
                     # [FIX] Show Full Worker ID (e.g. TVP-1221001644)
@@ -4435,18 +4778,30 @@ class ModernTranscoderUI(QMainWindow):
         src_norm = os.path.normpath(task["source"])
         out_norm = os.path.normpath(output_path)
         
-        cmd = tx.construct_command(src_norm, out_norm, transcode_params)
-        
-        # Use TranscodeWorker to ensure NO CONSOLE WINDOW on Windows
-        # Prevent double creation
-        if task["widget"] in self.workers:
-            old_worker = self.workers.pop(task["widget"])
-            old_worker.stop()
-            old_worker.wait()
-            old_worker.deleteLater()
-
-        debug_log(f"[RUN_TRANSCODE] Creating worker...")
-        worker = TranscodeWorker(cmd, target_duration)
+        # [NEW] Check QC Mode Branch
+        if task.get("is_qc_mode"):
+            pdf_out_norm = out_norm.rsplit('.', 1)[0] + ".pdf"
+            task["output_path_ref"] = pdf_out_norm # Ensure completion handler looks for PDF
+            
+            if task["widget"] in self.workers:
+                old_worker = self.workers.pop(task["widget"])
+                old_worker.stop()
+                old_worker.wait()
+                old_worker.deleteLater()
+                
+            debug_log(f"[RUN_QC] Creating QC worker...")
+            worker = QCWorker(src_norm, pdf_out_norm, task_ref=task)
+        else:
+            cmd = tx.construct_command(src_norm, out_norm, transcode_params)
+            
+            if task["widget"] in self.workers:
+                old_worker = self.workers.pop(task["widget"])
+                old_worker.stop()
+                old_worker.wait()
+                old_worker.deleteLater()
+    
+            debug_log(f"[RUN_TRANSCODE] Creating worker...")
+            worker = TranscodeWorker(cmd, target_duration)
         worker.progress_signal.connect(lambda p, t: self.update_task_progress(task["widget"], p, t))
         worker.finished_signal.connect(lambda s, m: self.on_transcode_finished_worker(task, s, m, single_run))
         # [FIX] Do NOT connect finished->deleteLater automatically. 
@@ -4457,7 +4812,10 @@ class ModernTranscoderUI(QMainWindow):
         debug_log(f"[RUN_TRANSCODE] Worker started successfully")
         
         self.workers[task["widget"]] = worker # Track worker
-        task["widget"].lbl_status.setText("Transcoding...")
+        if task.get("is_qc_mode") or task.get("is_qc"):
+            task["widget"].lbl_status.setText("QC Analyzing...")
+        else:
+            task["widget"].lbl_status.setText("Transcoding...")
         
         self.update_cluster_activity()
         task["widget"].set_started() # Ensure start time is recorded for UI
@@ -4474,7 +4832,9 @@ class ModernTranscoderUI(QMainWindow):
 
     def on_nav_clicked(self, clicked_btn):
         try:
-            print(f"DEBUG_NAV: Clicked {clicked_btn.text()}")
+            try:
+                print(f"DEBUG_NAV: Clicked {clicked_btn.text().encode('utf-8').decode('cp950', 'replace')}")
+            except: pass
             # Uncheck others
             for btn in [self.btn_home, self.btn_dash, self.btn_watch, self.btn_cluster, self.btn_settings]:
                 btn.setChecked(btn == clicked_btn)
@@ -4544,9 +4904,8 @@ class ModernTranscoderUI(QMainWindow):
         
         self.settings.set("cluster_path", new_cluster_path)
         
-        # Parallel Tasks logic
-        self.settings.set("max_parallel_tasks", self.spin_parallel.value())
-
+        # Parallel Tasks logic is now handled directly by its own connection
+        
         # Worker Output Path
         self.settings.set("worker_output_path", self.edit_worker_out.text())
 
@@ -4722,6 +5081,30 @@ class ModernTranscoderUI(QMainWindow):
         # 4. Relaunch Application (Suicide & Restart)
         try:
              import sys, subprocess
+             
+             # [v27.10.77] Safely teardown all threads first to avoid "QThread Destroyed" crash
+             if hasattr(self, 'watch_engine'):
+                 try: 
+                     self.watch_engine.stop()
+                     self.watch_engine.wait(2000)
+                 except: pass
+             if hasattr(self, '_watch_task_threads'):
+                 for t in getattr(self, '_watch_task_threads', []):
+                     try:
+                         t.quit()
+                         t.wait(500)
+                     except: pass
+             if hasattr(self, 'cluster_mgr'):
+                 try: self.cluster_mgr.stop()
+                 except: pass
+             if hasattr(self, 'workers'):
+                 for w, worker in list(self.workers.items()):
+                     try:
+                         worker.kill()
+                         worker.quit()
+                         worker.wait(1000)
+                     except: pass
+
              QApplication.quit()
              
              # Purification: Remove PyInstaller env vars to prevent DLL load failures
@@ -4880,7 +5263,7 @@ class ModernTranscoderUI(QMainWindow):
             sb = self.watch_log.verticalScrollBar()
             sb.setValue(sb.maximum())
 
-    def on_watch_folder_detected(self, file_path, folder_name, is_repeat=False):
+    def on_watch_folder_detected(self, file_path, folder_name, is_repeat=False, is_qc_mode=False):
         """
         Triggered when WatchFolderEngine detects a new stable file.
         Uses a background thread to prevent UI freezing during metadata probe.
@@ -4911,17 +5294,18 @@ class ModernTranscoderUI(QMainWindow):
             "source_type": f"Watch: {folder_name}",
             "cluster_status": "Probing",
             "placeholder_id": placeholder_id,
-            "status": "探測中 (Probing...)"
+            "status": "探測中 (Probing...)",
+            "is_qc_mode": is_qc_mode
         }
         self.add_task_to_queue(
             source_path=file_path, 
             source_type=f"Watch: {folder_name}", 
             base_name_override=base_name,
-            extra_data={"placeholder_id": placeholder_id, "status": "探測中 (Probing...)"}
+            extra_data={"placeholder_id": placeholder_id, "status": "探測中 (Probing...)", "is_qc_mode": is_qc_mode}
         )
 
         # Launch Background Thread
-        thread = WatchTaskCreationThread(file_path, folder_name, self, is_repeat)
+        thread = WatchTaskCreationThread(file_path, folder_name, self, is_repeat, is_qc_mode)
         thread.placeholder_id = placeholder_id # Pass id
         thread.task_ready.connect(self.on_watch_task_ready)
         thread.task_failed.connect(self.on_watch_task_probe_failed) # [v27.10.74]
@@ -4949,6 +5333,7 @@ class ModernTranscoderUI(QMainWindow):
                     w.lbl_status.setStyleSheet("color: #ef5350; font-weight: bold;")
                 break
 
+    def on_watch_task_ready(self, task_data):
         """Called when background thread finishes metadata probe and deduplication."""
         source = task_data.get("source")
         if source:
@@ -5345,9 +5730,16 @@ class ModernTranscoderUI(QMainWindow):
         dlg = PresetSelectorDialog(self)
         if dlg.exec():
             preset = dlg.get_selection()
+            qc_mode = dlg.is_qc_enabled()
             if preset:
+                from core.security import LicenseManager
+                lm = LicenseManager()
+                if not qc_mode and not lm.has_transcode_license():
+                    QMessageBox.warning(self, "權限不足", "目前的授權版本沒有包含「標準轉碼模組」，因此只能新增「QC 檢測」資料夾。")
+                    return
+            
                 current = self.settings.get("watch_folders", [])
-                current.append({"name": name, "path": path, "preset": preset, "enabled": True})
+                current.append({"name": name, "path": path, "preset": preset, "enabled": True, "qc_mode": qc_mode})
                 self.settings.set("watch_folders", current)
                 self.save_settings()
                 self.refresh_watch_list_ui()
@@ -5368,13 +5760,21 @@ class ModernTranscoderUI(QMainWindow):
         if not (ok and name): return
         
         # 3. Edit Preset (Custom Large List)
-        dlg = PresetSelectorDialog(self, initial_selection=wf.get("preset"))
+        dlg = PresetSelectorDialog(self, initial_selection=wf.get("preset"), is_qc=wf.get("qc_mode", False))
         if dlg.exec():
             preset = dlg.get_selection()
+            qc_mode = dlg.is_qc_enabled()
             if preset:
+                from core.security import LicenseManager
+                lm = LicenseManager()
+                if not qc_mode and not lm.has_transcode_license():
+                    QMessageBox.warning(self, "權限不足", "目前的授權版本沒有包含「標準轉碼模組」，因此只能新增「QC 檢測」資料夾。")
+                    return
+                    
                 wf["path"] = path
                 wf["name"] = name
                 wf["preset"] = preset
+                wf["qc_mode"] = qc_mode
                 self.settings.set("watch_folders", watch_folders)
                 self.save_settings()
                 self.refresh_watch_list_ui()
@@ -5423,6 +5823,7 @@ class ModernTranscoderUI(QMainWindow):
 
 
     def update_task_progress(self, widget, percent, text):
+        task = getattr(widget, 'task_data', {})
         try:
             if not widget or getattr(widget, 'stopped', False): return # Block updates if stopped
             
@@ -5454,7 +5855,6 @@ class ModernTranscoderUI(QMainWindow):
                 widget.progress.setFormat(text) # [MODIFIED] Set text on progress bar
             
             # [NEW] Sync Mirror Widget (if exists)
-            task = getattr(widget, 'task_data', {})
             mirror = task.get("mirror_widget")
             if mirror:
                 # Sync Progress
@@ -5516,56 +5916,61 @@ class ModernTranscoderUI(QMainWindow):
             worker = self.workers.get(widget)
             
             if success:
+               if task.get("is_qc_mode"):
+                   task["qc_result_msg"] = msg
                self.on_transcode_complete(0, QProcess.NormalExit, task, single_run)
                self.update_cluster_activity() # [v27.10.29] Immediate success reporting
             else:
                 # [NEW] Intelligent Auto-Retry for Automated Tasks (WatchFolder/Node)
                 source_type = task.get("source_type", "Manual")
                 
+                is_qc = task.get("is_qc_mode", False)
+                
                 # Retry Logic
-                if source_type != "Manual" and "Cancelled" not in msg:
+                if source_type != "Manual" and "Cancelled" not in msg and not is_qc:
                     retries = task.get("retry_count", 0)
                     if retries < 2:
                         task["retry_count"] = retries + 1
                         debug_log(f"Auto-Retry Task: {task.get('base_name')} (Attempt {retries+1}) triggered by {source_type}")
                         if widget:
-                            # [FIX v27.9.10] Widget Validity Check to prevent crash
                             try:
-                                # [FIX] Show Reason in Retry Status
                                 short_reason, _ = self.analyze_error_suggestion(msg)
                                 short_err = short_reason.split('\n')[0][:15] if short_reason else "Error"
                                 
                                 widget.lbl_status.setText(f"Retrying ({retries+1}): {short_err}...")
                                 widget.lbl_status.setStyleSheet("color: #ffa726;")
                             except RuntimeError:
-                                # Widget was deleted, skip UI update
                                 pass
                         
                         # Do NOT archive yet. Wait for retry.
                         QTimer.singleShot(3000, lambda: self.run_transcode(task, single_run))
                         return
-                    else:
-                        # [NEW] Retries exhausted. Update UI with final reason.
-                        if widget:
-                            try:
-                                reason, _ = self.analyze_error_suggestion(msg)
-                                final_reason = reason.split('\n')[0] if reason else "Transcode Failed"
-                                widget.lbl_status.setText(f"失敗: {final_reason}")
-                                widget.lbl_status.setStyleSheet("color: #ef5350; font-weight: bold;")
-                                widget.state = "failed"
-                                widget.last_error_log = msg
 
-                                # [FIX v27.10.69] Broadcast Final Failure to Cluster
-                                if hasattr(self, 'cluster_mgr'):
-                                    f_update = task.copy()
-                                    if "widget" in f_update: del f_update["widget"]
-                                    if "mirror_widget" in f_update: del f_update["mirror_widget"]
-                                    f_update["status"] = "Failed"
-                                    f_update["error"] = final_reason
-                                    self.cluster_mgr.broadcast_task(f_update)
-                            except RuntimeError:
-                                # Widget was deleted, skip UI update
-                                pass
+                # Final Failure Update (Runs for Manual, Cancelled, QC, or exhausted retries)
+                if widget:
+                    try:
+                        if is_qc:
+                            final_reason = msg # Keep full QC message
+                        else:
+                            reason, _ = self.analyze_error_suggestion(msg)
+                            final_reason = reason.split('\n')[0] if reason else "Transcode Failed"
+                            
+                        widget.lbl_status.setText(f"失敗: {final_reason}" if not is_qc else final_reason)
+                        widget.lbl_status.setStyleSheet("color: #ef5350; font-weight: bold;")
+                        widget.state = "failed"
+                        widget.last_error_log = msg
+
+                        # Broadcast Final Failure to Cluster
+                        if hasattr(self, 'cluster_mgr'):
+                            f_update = task.copy()
+                            if "widget" in f_update: del f_update["widget"]
+                            if "mirror_widget" in f_update: del f_update["mirror_widget"]
+                            f_update["status"] = "Failed"
+                            f_update["error"] = final_reason
+                            self.cluster_mgr.broadcast_task(f_update)
+                    except RuntimeError:
+                        # Widget was deleted, skip UI update
+                        pass
 
                 # [NEW] Archive to _ERROR ONLY AFTER Retries Exhausted
                 src_path = task.get("source")
@@ -5601,6 +6006,13 @@ class ModernTranscoderUI(QMainWindow):
                         success, f_msg = self._safe_move(src_path, dest_path)
                         if not success:
                             print(f"Error Archive Failed: {f_msg}")
+                            
+                        # [NEW] Move QC PDF to Error Folder
+                        if is_qc:
+                            pdf_temp_path = task.get("output_path_ref")
+                            if pdf_temp_path and os.path.exists(pdf_temp_path):
+                                pdf_err_path = os.path.splitext(dest_path)[0] + ".pdf"
+                                self._safe_move(pdf_temp_path, pdf_err_path)
                     except Exception as e:
                         print(f"Error Archive Exception: {e}")
 
@@ -5774,6 +6186,51 @@ class ModernTranscoderUI(QMainWindow):
                 # [FIX] Final UI Update via set_done to ensure 100% and Play Button
                 widget.set_done(output_path, self.player, speed_text)
                 
+                if task.get("is_qc_mode") or task.get("is_qc"):
+                    qc_data = task.get("qc_data", {})
+                    metrics = qc_data.get("metrics", {})
+                    info = qc_data.get("info", {})
+                    
+                    # 1. Basic Info (Codec | Res | FPS)
+                    v_info = f"{info.get('video_codec', '?')} | {info.get('video_resolution', '?')} | {info.get('fps', '?')}"
+                    
+                    # 2. Mosaic (Mosaic Count)
+                    mosaic = f"馬賽克:{metrics.get('mosaic_count', 0)}"
+                    
+                    # 3. Freeze (Freeze Count)
+                    freeze = f"定格:{metrics.get('freeze_count', 0)}"
+                    
+                    # 4. Timecode
+                    tc = info.get("start_tc", "00:00:00:00")
+                    
+                    # 5. Duration
+                    dur_sec = info.get("duration_sec", 0)
+                    hrs = int(dur_sec // 3600)
+                    mins = int((dur_sec % 3600) // 60)
+                    secs = int(dur_sec % 60)
+                    dur_str = f"{hrs:02d}:{mins:02d}:{secs:02d}"
+                    
+                    # 6. Audio (LUFS | Peak)
+                    lufs = metrics.get("lufs_i")
+                    if lufs is None: lufs = "?"
+                    peak = metrics.get("peak_db")
+                    if peak is None: peak = "?"
+                    audio = f"{lufs}LUFS / {peak}dB"
+                    
+                    status_text = f"完成: {v_info} | {mosaic} | {freeze} | {tc} | {dur_str} | {audio}"
+                    widget.lbl_status.setText(status_text)
+                    
+                    if metrics.get("mosaic_count", 0) > 0 or metrics.get("freeze_count", 0) > 0:
+                        widget.lbl_status.setStyleSheet("color: #ffa726; font-weight: bold; font-size: 10pt;")
+                    else:
+                        widget.lbl_status.setStyleSheet("color: #66bb6a; font-weight: bold; font-size: 10pt;")
+                elif task.get("qc_result_msg"):
+                    widget.lbl_status.setText(task.get("qc_result_msg"))
+                    if "警告" in task.get("qc_result_msg"):
+                        widget.lbl_status.setStyleSheet("color: #ffa726; font-weight: bold;") # Orange for warnings
+                    else:
+                        widget.lbl_status.setStyleSheet("color: #66bb6a; font-weight: bold;") # Green for clear pass
+                
                 # [NEW] Broadcast Completion to Cluster
                 if hasattr(self, 'cluster_mgr'):
                     cluster_update = task.copy()
@@ -5830,6 +6287,25 @@ class ModernTranscoderUI(QMainWindow):
                             success, a_msg = self._safe_move(src_path, dest_path)
                             if success:
                                 print("Source archived successfully.")
+                                # [FIX] Update task source path so playback/re-queue works
+                                task["source"] = dest_path
+                                if "source_path" in task:
+                                    task["source_path"] = dest_path
+                                
+                                # [FIX] Force widget to recognize the new path
+                                if widget and hasattr(widget, 'set_task_data'):
+                                    # Update the widget's internal dictionary copy if it is a copy
+                                    if hasattr(widget, 'task_data') and isinstance(widget.task_data, dict):
+                                        widget.task_data["source"] = dest_path
+                                        if "source_path" in widget.task_data:
+                                            widget.task_data["source_path"] = dest_path
+                                    # Don't call set_task_data directly as it overrides lbl_info which we may not want
+                                    # Or rather, set_task_data is safe. Let's just call it.
+                                    widget.set_task_data(task)
+                                
+                                # [NEW] Force an immediate save to persist the new DONE path
+                                if hasattr(self, 'save_pending_tasks_to_settings'):
+                                    self.save_pending_tasks_to_settings()
                             else:
                                 print(f"Archive Failed: {a_msg}")
                         except Exception as move_err:
@@ -6161,13 +6637,19 @@ class ModernTranscoderUI(QMainWindow):
             
             from core.security import LicenseManager
             lm = LicenseManager()
+            import time
 
             def update_countdown():
                 self._countdown -= 1
                 alert_dlg.set_dongle_removed(self._countdown)
                 
                 # Re-check if dongle is inserted
-                is_back, _, _ = lm.check_protection()
+                st = time.time()
+                timeout = 5 # seconds
+                is_back = False
+                while not is_back and time.time() - st < timeout:
+                    is_back, _, _, _ = lm.check_protection()
+                    if is_back: break
                 if is_back:
                     timer.stop()
                     alert_dlg.accept()
@@ -6312,7 +6794,8 @@ class ModernTranscoderUI(QMainWindow):
                       existing_widget.set_started()
                  # [FIX] If the state was already running but text is stuck on Probing, force reset it
                  elif hasattr(existing_widget, 'lbl_status') and ("探測中" in existing_widget.lbl_status.text() or "Probing" in existing_widget.lbl_status.text()):
-                      existing_widget.lbl_status.setText("Transcoding...")
+                      is_qc = task_data.get('action') == 'QC' or task_data.get('qc_mode')
+                      existing_widget.lbl_status.setText("QC中" if is_qc else "轉碼中")
                       existing_widget.lbl_status.setStyleSheet("color: #4CAF50;")
             elif status_check in ["Failed", "Error"]:
                  err = task_data.get("error") or "Failed"
@@ -6687,8 +7170,12 @@ class ModernTranscoderUI(QMainWindow):
         if 0 <= index < len(watch_folders):
             watch_folders[index]["enabled"] = new_state
             self.settings.set("watch_folders", watch_folders)
-            self.settings.set("watch_folders", watch_folders)
             self.settings.save()
+            # [FIX] Immediate Feedback: Reflect changes right away
+            if new_state:
+                # If turning on, wake up the engine immediately
+                self.watch_engine.force_scan()
+            self.refresh_watch_list_ui()
 
     def show_clear_context_menu(self, pos):
         """Show context menu for Reset History"""
