@@ -98,7 +98,7 @@ class StereoVUMeter(QWidget): # Kept name for compatibility, but logic is Multi-
                 max_db = 0
                 pct = (val - min_db) / (max_db - min_db)
                 pct = max(0, min(1, pct))
-                return int(h - bottom_margin - (pct * inner_h))
+                return int(round(h - bottom_margin - (pct * inner_h)))
 
             def draw_bar(x, level, peak):
                 painter.fillRect(x, top_margin, bar_w, inner_h, QColor(25, 25, 25))
@@ -114,19 +114,20 @@ class StereoVUMeter(QWidget): # Kept name for compatibility, but logic is Multi-
                     val = -60 + (60 * pct)
                     
                     val = -60 + (60 * pct)
-                    
                     if self.color_mode == "green":
                          # Green Color Scheme (Result)
-                         if val <= -20.0: c = QColor(0, 200, 0)
+                         if val <= -18.0: c = QColor(0, 200, 0)
                          elif val <= -10.0: c = QColor(255, 200, 0)
                          else: c = QColor(255, 40, 40)
                     else:
-                         # Blue Color Scheme (Source) - Modified as per user request (Yellow for -10~0)
-                         if val <= -20.0: c = QColor(0, 150, 255) # Light Blue
+                         # Blue Color Scheme (Source)
+                         if val <= -18.0: c = QColor(0, 150, 255) # Light Blue
                          elif val <= -10.0: c = QColor(255, 200, 0) # Yellow (Same as Green mode)
                          else: c = QColor(255, 40, 40) # Red Peak
 
-                    if val <= level:
+                    # [v27.10.91] Add 0.5dB epsilon to ensure the block renders exactly on the tick line 
+                    # without falling 1 pixel short due to step truncation
+                    if val <= level + 0.5:
                         painter.fillRect(x, curr_y, bar_w, block_h, c)
                     else:
                         painter.fillRect(x, curr_y, bar_w, block_h, QColor(40, 40, 40))
@@ -144,7 +145,7 @@ class StereoVUMeter(QWidget): # Kept name for compatibility, but logic is Multi-
             font = QFont("Segoe UI")
             font.setPixelSize(9) # Use Pixel Size for consistency across DPI
             painter.setFont(font)
-            dbfs_ticks = [0, -10, -20, -30, -40, -60]
+            dbfs_ticks = [0, -10, -18, -23, -30, -40, -60] # [v27.10.92] Realign 0 VU to -18 dBFS for Taiwan Broadcast Standard
             fm = painter.fontMetrics()
             v_off = fm.ascent() // 2 - 1
 
@@ -162,11 +163,13 @@ class StereoVUMeter(QWidget): # Kept name for compatibility, but logic is Multi-
 
             for db in dbfs_ticks:
                 y = db_to_y(db)
-                is_ref = (db == -20)
-                t_len = 8 if (db==0 or is_ref) else 5
+                is_ref = (db == -23)
+                is_tone = (db == -18)
+                t_len = 8 if (db==0 or is_ref or is_tone) else 5
                 
                 if db == 0: color = QColor(255, 60, 60)
                 elif is_ref: color = QColor(200, 200, 200)
+                elif is_tone: color = QColor(0, 255, 255) # Cyan for 1kHz Reference
                 else: color = QColor(150, 150, 150)
                 painter.setPen(color)
                 
@@ -174,10 +177,11 @@ class StereoVUMeter(QWidget): # Kept name for compatibility, but logic is Multi-
                 painter.drawLine(right_ticks_x, y, right_ticks_x + t_len, y)
                 painter.drawText(right_ticks_x + t_len + 4, y + v_off, str(db))
                 
-                # Left Side: VU (Ref -20dBFS = 0VU) (Number only)
-                vu_val = db + 20
+                # Left Side: VU (Ref -18dBFS = 0VU) (Number only)
+                vu_val = db + 18
                 label = f"{vu_val:+d}" if vu_val != 0 else "0"
-                if is_ref: painter.setPen(QColor(0, 255, 0)) # Highlight 0VU Green
+                if is_ref: painter.setPen(QColor(150, 150, 150)) # -5 VU
+                elif is_tone: painter.setPen(QColor(0, 255, 0)) # Highlight 0 VU Green
                 
                 painter.drawLine(left_ticks_x, y, left_ticks_x - t_len, y)
                 painter.drawText(left_ticks_x - t_len - fm.horizontalAdvance(label) - 2, y + v_off, label)

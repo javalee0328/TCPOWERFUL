@@ -168,7 +168,8 @@ class QCWorker(QThread):
             self.progress_signal.emit(10, "分析中 (Analyzing)...")
             if self.killed: return
             analyzer = BroadcastQC()
-            qc_data = analyzer.analyze(self.target_file)
+            # [FIX] Pass progress callback so the UI doesn't hang on large files
+            qc_data = analyzer.analyze(self.target_file, progress_callback=lambda p, text: self.progress_signal.emit(p, text))
             
             if self.killed: return
             self.progress_signal.emit(70, "產生報告總表 (Generating Batch PDF)...")
@@ -216,6 +217,25 @@ class DongleCheckThread(QThread):
             self.result_ready.emit(allowed, msg, ids)
         except Exception as e:
             self.result_ready.emit(False, str(e), [])
+
+class AsyncFileMover(QThread):
+    """[NEW] Background thread for moving large files without freezing the UI."""
+    finished_signal = Signal(bool, str, str, str, dict, object) # success, msg, src, dest, task, widget
+
+    def __init__(self, main_window, src_path, dest_path, task, widget):
+        super().__init__()
+        self.main_window = main_window # Reference to use _safe_move
+        self.src_path = src_path
+        self.dest_path = dest_path
+        self.task = task
+        self.widget = widget
+
+    def run(self):
+        try:
+            success, a_msg = self.main_window._safe_move(self.src_path, self.dest_path)
+            self.finished_signal.emit(success, a_msg, self.src_path, self.dest_path, self.task, self.widget)
+        except Exception as e:
+            self.finished_signal.emit(False, str(e), self.src_path, self.dest_path, self.task, self.widget)
 
 # [NEW] Background Thread for Watch Folder Task Creation
 class WatchTaskCreationThread(QThread):
@@ -994,6 +1014,42 @@ class TaskProgressWidget(QWidget):
         if hasattr(self, 'lbl_done_bar'):
             self.lbl_done_bar.show()
 
+        # [NEW] Restore QC Details that were being obliterated by cluster sync loopbacks
+        if self.task_data:
+            if self.task_data.get("is_qc_mode") or self.task_data.get("is_qc"):
+                qc_data = self.task_data.get("qc_data", {})
+                metrics = qc_data.get("metrics", {})
+                info = qc_data.get("info", {})
+                if info:
+                    v_info = f"{info.get('video_codec', '?')} | {info.get('video_resolution', '?')} | {info.get('fps', '?')}"
+                    mosaic = f"馬賽克:{metrics.get('mosaic_count', 0)}"
+                    freeze = f"定格:{metrics.get('freeze_count', 0)}"
+                    tc = info.get("start_tc", "00:00:00:00")
+                    dur_sec = info.get("duration_sec", 0)
+                    hrs = int(dur_sec // 3600)
+                    mins = int((dur_sec % 3600) // 60)
+                    secs = int(dur_sec % 60)
+                    dur_str = f"{hrs:02d}:{mins:02d}:{secs:02d}"
+                    lufs = metrics.get("lufs_i")
+                    if lufs is None: lufs = "?"
+                    peak = metrics.get("peak_db")
+                    if peak is None: peak = "?"
+                    audio = f"{lufs}LUFS / {peak}dB"
+                    status_text = f"完成: {v_info} | {mosaic} | {freeze} | {tc} | {dur_str} | {audio}"
+                    self.lbl_status.setText(status_text)
+                    if metrics.get("mosaic_count", 0) > 0 or metrics.get("freeze_count", 0) > 0:
+                        self.lbl_status.setStyleSheet("color: #ffa726; font-weight: bold; font-size: 10pt;")
+                    else:
+                        self.lbl_status.setStyleSheet("color: #66bb6a; font-weight: bold; font-size: 10pt;")
+            elif self.task_data.get("qc_result_msg"):
+                msg = self.task_data.get("qc_result_msg")
+                self.lbl_status.setText(msg)
+                if "警告" in msg:
+                    self.lbl_status.setStyleSheet("color: #ffa726; font-weight: bold;")
+                else:
+                    self.lbl_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
+
+
         
         # [FIX] Use real file modification time if available
         try:
@@ -1641,6 +1697,36 @@ class ModernTranscoderUI(QMainWindow):
         # [v27.10.0] Persistent cleared tasks tracking
         self.cleared_tasks_file = get_app_path("cleared_tasks.json")
         self.cleared_tasks = self.load_cleared_tasks()
+        
+        # [v27.10.0] STARTUP PURGE: Remove CLUSTER_SYNC task manifests for cleared files
+        # This prevents ghost tasks from re-appearing via cluster sync on every restart.
+        try:
+            import re as _re
+            cluster_task_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "CLUSTER_SYNC", "tasks")
+            cluster_task_dir = os.path.normpath(cluster_task_dir)
+            if os.path.exists(cluster_task_dir) and self.cleared_tasks:
+                for fn in os.listdir(cluster_task_dir):
+                    if not (fn.endswith(".json") or fn.endswith(".lock")):
+                        continue
+                    try:
+                        # Strip .json extension
+                        name_no_ext = os.path.splitext(fn)[0]
+                        # Strip hex hash suffix: e.g., _c191ace576b89 (variable length hex)
+                        candidate = _re.sub(r'_[0-9a-f]{8,}$', '', name_no_ext, flags=_re.IGNORECASE)
+                        # Replace __ with ## (cluster uses __ in filenames for ## in task names)
+                        candidate = candidate.replace("__", "##")
+                        # Use get_task_identifier logic: strip ext + strip _HHMMSS timestamp
+                        cand_base = os.path.splitext(candidate.lower())[0]
+                        cand_base = _re.sub(r'_\d{6}$', '', cand_base)
+                        task_id_check = f"file::{cand_base}"
+                        if task_id_check in self.cleared_tasks:
+                            os.remove(os.path.join(cluster_task_dir, fn))
+                            print(f"[Startup Purge] Removed stale cluster manifest: {fn}")
+                    except Exception as e_inner:
+                        print(f"[Startup Purge] Could not remove {fn}: {e_inner}")
+        except Exception as e:
+            print(f"[Startup Purge] Error during cluster cleanup: {e}")
+        
         self.node_aliases = {} # [NEW] Storage for Cluster Aliases
         self.current_running_task = None # [FIX] Initialize missing attribute
         self.workers = {} # Key: widget, Value: TranscodeWorker
@@ -1762,42 +1848,53 @@ class ModernTranscoderUI(QMainWindow):
         debug_log("MainWindow: closeEvent - Shutdown complete.")
         event.accept()
 
-    def _safe_move(self, src, dst, retries=8, delay=2.0):
-        """[v27.10.50] Robust file move with copy+delete for NAS/locked files (WinError 32)."""
-        # Try shutil.move first (fast path)
-        try:
-            if not os.path.exists(src):
-                return False, f"Source not found: {src}"
-            dst_dir = os.path.dirname(dst)
-            if dst_dir and not os.path.exists(dst_dir):
-                try: os.makedirs(dst_dir, exist_ok=True)
-                except: pass
-            shutil.move(src, dst)
-            return True, "Success"
-        except Exception as e:
-            first_err = str(e)
+    def _safe_move(self, src, dst, max_retries=15, delay_sec=4.0):
+        """
+        Safely moves a file, patiently waiting out transient file locks.
+        Avoids shutil.move initially because it catches WinError 32 and falls back to copy2, 
+        causing infinite 27GB copy-loops if the file is locked!
+        """
+        if not os.path.exists(src):
+            return False, f"Source not found: {src}"
             
-        # Slow path: copy + delete (Handles NAS locking)
-        last_err = first_err
-        for i in range(retries):
+        dst_dir = os.path.dirname(dst)
+        if dst_dir and not os.path.exists(dst_dir):
+            try: os.makedirs(dst_dir, exist_ok=True)
+            except: pass
+
+        import errno
+        import shutil
+        last_err = ""
+        
+        # Patient retry loop (up to 60 seconds total)
+        for attempt in range(max_retries):
             try:
-                if not os.path.exists(src):
-                    return False, f"Source not found after wait: {src}"
-                dst_dir = os.path.dirname(dst)
-                if dst_dir and not os.path.exists(dst_dir):
-                    try: os.makedirs(dst_dir, exist_ok=True)
-                    except: pass
-                # [KEY FIX] shutil.copy2 then os.remove = NAS safe
-                shutil.copy2(src, dst)
-                try: os.remove(src)
-                except: pass  # Source delete failure is OK; file is already at destination
-                debug_log(f"Move success via copy+delete (attempt {i+1}): {os.path.basename(src)}")
+                # [CRITICAL FIX] Use explicit os.rename to test for locks. 
+                # If we use shutil.move, it catches OSErrors (like locks) and tries to copy2() 
+                # the 27GB file entirely before failing on the os.remove, leading to an infinite copy loop.
+                os.rename(src, dst)
+                if attempt > 0:
+                    debug_log(f"Move succeeded after {attempt*delay_sec}s of waiting: {os.path.basename(src)}")
                 return True, "Success"
-            except Exception as e:
-                last_err = str(e)
-                debug_log(f"Move locked, retrying {i+1}/{retries}: {os.path.basename(src)}")
-                time.sleep(delay)
-        return False, f"Failed after {retries} retries: {last_err}"
+            except OSError as e:
+                # EXDEV means Cross-device link (moving to another drive).
+                # We definitively need to copy+delete in this case. No loop required for the move strategy switch.
+                if e.errno == errno.EXDEV:
+                    try:
+                        shutil.move(src, dst)
+                        return True, "Success via cross-device move"
+                    except Exception as cross_e:
+                        last_err = f"Cross-device move failed: {cross_e}"
+                        time.sleep(delay_sec)
+                        continue
+                else:
+                    # It's locked or inaccessible. Wait it out gently safely.
+                    last_err = str(e)
+                    time.sleep(delay_sec)
+        
+        err_msg = f"Move absolutely failed after {max_retries} retries ({max_retries*delay_sec}s). File remains locked. Reason: {last_err}"
+        debug_log(err_msg)
+        return False, err_msg
         
 
     def update_history_menus(self):
@@ -1885,7 +1982,19 @@ class ModernTranscoderUI(QMainWindow):
              QMessageBox.warning(self, "Error", "Folder not found: " + path)
 
     def check_smart_remux(self, path):
-        """Probes file and returns fixed path if SLES/Unknown & _remux exists."""
+        """Probes file and returns fixed path if SLES/Unknown & _remux exists. Auto-resolves archived files."""
+        # [v27.10.90] Auto-resolve paths that were archived to DONE/TEMP/ERROR by Watch Folders
+        resolved_path = path
+        if path and not os.path.exists(path):
+            base_name = os.path.basename(path)
+            dir_name = os.path.dirname(path)
+            for sub in ["DONE", "_DONE", "TEMP", "_TEMP", "ERROR", "_ERROR"]:
+                alt_path = os.path.join(dir_name, sub, base_name)
+                if os.path.exists(alt_path):
+                    resolved_path = alt_path
+                    break
+        path = resolved_path
+
         if not path or not os.path.exists(path): return path, None
         
         try:
@@ -3433,14 +3542,25 @@ class ModernTranscoderUI(QMainWindow):
         return super().eventFilter(obj, event)
 
     def update_metadata_panel(self, path, preloaded_meta=None):
+         # [v27.10.90] Auto-resolve paths that were archived to DONE/TEMP/ERROR by Watch Folders
+         resolved_path = path
+         if path and not os.path.exists(path):
+             base_name = os.path.basename(path)
+             dir_name = os.path.dirname(path)
+             for sub in ["DONE", "_DONE", "TEMP", "_TEMP", "ERROR", "_ERROR"]:
+                 alt_path = os.path.join(dir_name, sub, base_name)
+                 if os.path.exists(alt_path):
+                     resolved_path = alt_path
+                     break
+                     
          # Update Source Label
-         self.lbl_source_path.setText(f"{path}")
+         self.lbl_source_path.setText(f"{resolved_path}")
          
          if preloaded_meta:
              meta = preloaded_meta
          else:
              from core.metadata import get_video_metadata
-             meta = get_video_metadata(path)
+             meta = get_video_metadata(resolved_path)
          if meta:
              self.lbl_format.setText(f"Fmt: {meta.get('format', '--')}")
              self.lbl_vcodec.setText(f"V.Codec: {meta.get('codec', '--')}")
@@ -4023,6 +4143,20 @@ class ModernTranscoderUI(QMainWindow):
         # 1. Determine Source
         if source_path:
             source = source_path
+            
+            # [v27.10.0] FILTER CLEARED TASKS - Ghost Task Prevention
+            # Only block cluster-synced or startup-restored tasks.
+            # If the user physically drops a file into the Watch Folder (source starts with 'Watch'),
+            # we ALWAYS allow it so the same filename can be re-processed.
+            is_live_watch_drop = source_type and str(source_type).startswith("Watch")
+            if not is_live_watch_drop:
+                _temp_base_name = base_name_override if base_name_override else os.path.basename(source)
+                temp_task_data = {"source": source, "base_name": _temp_base_name}
+                task_id = self.get_task_identifier(temp_task_data)
+                if hasattr(self, 'cleared_tasks') and task_id in self.cleared_tasks:
+                    print(f"[BLOCKLIST] BLOCKED (Cluster/Restore): {task_id}")
+                    return
+
             # [NEW v27.4] If we are adding a file back MANUALLY, un-dismiss it from Dashboard
             if source_type == "Manual":
                 dismissed = self.settings.get("dismissed_dashboard_items", [])
@@ -6186,50 +6320,7 @@ class ModernTranscoderUI(QMainWindow):
                 # [FIX] Final UI Update via set_done to ensure 100% and Play Button
                 widget.set_done(output_path, self.player, speed_text)
                 
-                if task.get("is_qc_mode") or task.get("is_qc"):
-                    qc_data = task.get("qc_data", {})
-                    metrics = qc_data.get("metrics", {})
-                    info = qc_data.get("info", {})
-                    
-                    # 1. Basic Info (Codec | Res | FPS)
-                    v_info = f"{info.get('video_codec', '?')} | {info.get('video_resolution', '?')} | {info.get('fps', '?')}"
-                    
-                    # 2. Mosaic (Mosaic Count)
-                    mosaic = f"馬賽克:{metrics.get('mosaic_count', 0)}"
-                    
-                    # 3. Freeze (Freeze Count)
-                    freeze = f"定格:{metrics.get('freeze_count', 0)}"
-                    
-                    # 4. Timecode
-                    tc = info.get("start_tc", "00:00:00:00")
-                    
-                    # 5. Duration
-                    dur_sec = info.get("duration_sec", 0)
-                    hrs = int(dur_sec // 3600)
-                    mins = int((dur_sec % 3600) // 60)
-                    secs = int(dur_sec % 60)
-                    dur_str = f"{hrs:02d}:{mins:02d}:{secs:02d}"
-                    
-                    # 6. Audio (LUFS | Peak)
-                    lufs = metrics.get("lufs_i")
-                    if lufs is None: lufs = "?"
-                    peak = metrics.get("peak_db")
-                    if peak is None: peak = "?"
-                    audio = f"{lufs}LUFS / {peak}dB"
-                    
-                    status_text = f"完成: {v_info} | {mosaic} | {freeze} | {tc} | {dur_str} | {audio}"
-                    widget.lbl_status.setText(status_text)
-                    
-                    if metrics.get("mosaic_count", 0) > 0 or metrics.get("freeze_count", 0) > 0:
-                        widget.lbl_status.setStyleSheet("color: #ffa726; font-weight: bold; font-size: 10pt;")
-                    else:
-                        widget.lbl_status.setStyleSheet("color: #66bb6a; font-weight: bold; font-size: 10pt;")
-                elif task.get("qc_result_msg"):
-                    widget.lbl_status.setText(task.get("qc_result_msg"))
-                    if "警告" in task.get("qc_result_msg"):
-                        widget.lbl_status.setStyleSheet("color: #ffa726; font-weight: bold;") # Orange for warnings
-                    else:
-                        widget.lbl_status.setStyleSheet("color: #66bb6a; font-weight: bold;") # Green for clear pass
+                # QC Details moved to TaskWidget.set_done() to avoid cluster-sync overrides
                 
                 # [NEW] Broadcast Completion to Cluster
                 if hasattr(self, 'cluster_mgr'):
@@ -6263,9 +6354,13 @@ class ModernTranscoderUI(QMainWindow):
                 source_type = task.get("source_type", "Manual")
                 src_path = task.get("source") or task.get("source_path")
                 
+                # DIAGNOSTIC LOG: Find out why auto-archive fails for QC!
+                debug_log(f"Auto-Archive Check: type={source_type}, src={src_path}, exists={os.path.exists(src_path) if src_path else False}")
+                
+                # Auto-archive if it's NOT a Manual task (e.g. Watch:QC, Watch:Transcode, API, etc)
                 if source_type != "Manual" and src_path and os.path.exists(src_path):
                     try:
-                        print(f"DEBUG: Auto-Archiving {src_path}")
+                        print(f"DEBUG: Auto-Archiving {src_path} (Type: {source_type})")
                         src_dir = os.path.dirname(src_path)
                         done_dir = os.path.join(src_dir, "DONE")
                         
@@ -6281,36 +6376,19 @@ class ModernTranscoderUI(QMainWindow):
                             timestamp = time.strftime("%Y%m%d_%H%M%S")
                             dest_path = os.path.join(done_dir, f"{base}_{timestamp}{ext}")
                             
-                        print(f"Archiving Source: {src_path} -> {dest_path}")
+                        print(f"Archiving Source Asynchronously: {src_path} -> {dest_path}")
                         
-                        try:
-                            success, a_msg = self._safe_move(src_path, dest_path)
-                            if success:
-                                print("Source archived successfully.")
-                                # [FIX] Update task source path so playback/re-queue works
-                                task["source"] = dest_path
-                                if "source_path" in task:
-                                    task["source_path"] = dest_path
-                                
-                                # [FIX] Force widget to recognize the new path
-                                if widget and hasattr(widget, 'set_task_data'):
-                                    # Update the widget's internal dictionary copy if it is a copy
-                                    if hasattr(widget, 'task_data') and isinstance(widget.task_data, dict):
-                                        widget.task_data["source"] = dest_path
-                                        if "source_path" in widget.task_data:
-                                            widget.task_data["source_path"] = dest_path
-                                    # Don't call set_task_data directly as it overrides lbl_info which we may not want
-                                    # Or rather, set_task_data is safe. Let's just call it.
-                                    widget.set_task_data(task)
-                                
-                                # [NEW] Force an immediate save to persist the new DONE path
-                                if hasattr(self, 'save_pending_tasks_to_settings'):
-                                    self.save_pending_tasks_to_settings()
-                            else:
-                                print(f"Archive Failed: {a_msg}")
-                        except Exception as move_err:
-                            print(f"Archive Failed: {move_err}")
+                        # [FIX] Run the massive file move asynchronously to prevent UI freezing
+                        if not hasattr(self, '_async_movers'):
+                            self._async_movers = []
                             
+                        mover = AsyncFileMover(self, src_path, dest_path, task, widget)
+                        mover.finished_signal.connect(self._on_auto_archive_complete)
+                        self._async_movers.append(mover)
+                        mover.start()
+                        
+                        # The cleanups (save settings, etc) will continue when the mover finishes.
+                        
                     except Exception as archive_e:
                         print(f"Auto-Archive Error: {archive_e}")
             
@@ -6355,6 +6433,54 @@ class ModernTranscoderUI(QMainWindow):
             debug_log(f"on_transcode_complete Error: {e}\n{traceback.format_exc()}")
             if not single_run: self.process_next_task()
             else: self.is_processing = False
+
+    def _on_auto_archive_complete(self, success, a_msg, src_path, dest_path, task, widget):
+        if success:
+            print("Source archived successfully (Async).")
+            # [FIX] Update task source path so playback/re-queue works
+            task["source"] = dest_path
+            if "source_path" in task:
+                task["source_path"] = dest_path
+            
+            # [FIX] Force widget to recognize the new path without reverting to Pending
+            if widget and hasattr(widget, 'set_task_data'):
+                # Update the widget's internal dictionary copy if it is a copy
+                if hasattr(widget, 'task_data') and isinstance(widget.task_data, dict):
+                    widget.task_data["source"] = dest_path
+                    if "source_path" in widget.task_data:
+                        widget.task_data["source_path"] = dest_path
+                        
+                # [v27.11.0] CRITICAL FIX: Preserve the "Done"/UI state!
+                # Because on_transcode_complete already marked it done, calling set_task_data
+                # with an old `task` dict will revert the label to "Pending".
+                if hasattr(widget, 'state'):
+                    task["status"] = getattr(widget.lbl_status, 'text', lambda: "Done")()
+                    
+                widget.set_task_data(task)
+                
+                # Re-apply the done style explicitly just in case
+                if getattr(widget, 'state', None) == 'done':
+                    widget.progress.hide()
+                    if hasattr(widget, 'lbl_done_bar'): widget.lbl_done_bar.show()
+                    if hasattr(widget, 'lbl_status'):
+                        widget.lbl_status.setStyleSheet("color: #4CAF50; font-weight: bold; border: none;")
+            
+            # [NEW] Force an immediate save to persist the new DONE path
+            if hasattr(self, 'save_pending_tasks_to_settings'):
+                self.save_pending_tasks_to_settings()
+        else:
+            print(f"Archive Failed (Async): {a_msg}")
+            if widget and hasattr(widget, 'lbl_status'):
+                try:
+                    current_text = widget.lbl_status.text()
+                    widget.lbl_status.setText(f"{current_text} | ⚠️ 移檔失敗 (Move Failed)")
+                    widget.lbl_status.setStyleSheet("color: #ef5350; font-weight: bold; font-size: 10pt;")
+                except RuntimeError:
+                    pass
+            
+        # Cleanup the mover thread
+        if hasattr(self, '_async_movers'):
+            self._async_movers = [m for m in self._async_movers if m.isRunning()]
 
     def apply_styles(self):
         # Professional Dark Mode Stylesheet (Windows 11 inspired)
@@ -6502,13 +6628,36 @@ class ModernTranscoderUI(QMainWindow):
 
     def load_cleared_tasks(self):
         """Load list of cleared task identifiers to filter them out on restart"""
-        if os.path.exists(self.cleared_tasks_file):
-            try:
-                with open(self.cleared_tasks_file, "r", encoding="utf-8") as f:
-                    return set(json.load(f))  # Set for O(1) lookup
-            except:
-                return set()
-        return set()
+        import json as _json
+        print(f"[ClearedTasks] Loading from: {self.cleared_tasks_file}")
+        if not os.path.exists(self.cleared_tasks_file):
+            print(f"[ClearedTasks] File not found. Starting with empty set.")
+            return set()
+        try:
+            with open(self.cleared_tasks_file, "r", encoding="utf-8") as f:
+                raw_cleared = _json.load(f)
+            result = set()
+            for item in raw_cleared:
+                if not isinstance(item, str) or not item:
+                    continue
+                # Normalize: strip 'file::' prefix, strip extension, lowercase
+                key = item.lower()
+                if key.startswith("file::"):
+                    key = key[6:]   # strip 'file::' prefix
+                elif "::" in key:
+                    key = key.split("::", 1)[1]  # take basename part
+                # Strip extension if present
+                key, _ = os.path.splitext(key)
+                # Strip timestamp suffix _HHMMSS
+                import re
+                key = re.sub(r'_\d{6}$', '', key)
+                result.add(f"file::{key}")
+            print(f"[ClearedTasks] Loaded {len(result)} entries: {result}")
+            return result
+        except Exception as e:
+            print(f"[ClearedTasks] ERROR: {e}")
+            import traceback; traceback.print_exc()
+            return set()
     
     def save_cleared_tasks(self):
         """Persist cleared tasks list"""
@@ -6605,11 +6754,25 @@ class ModernTranscoderUI(QMainWindow):
              QTimer.singleShot(1000, self.process_next_task)
     
     def get_task_identifier(self, task_data):
-        """Generate unique identifier for a task based on source+basename"""
-        source = task_data.get("source") or task_data.get("source_path", "")
+        """Generate unique identifier for a task - FILENAME ONLY, path-agnostic.
+        Strips WatchFolder timestamp suffixes (e.g., _100422) and file extensions
+        to ensure blocklist matches regardless of deduplication renames.
+        """
+        import re
         basename = task_data.get("base_name", "")
-        # Use normalized path + basename as identifier
-        return f"{os.path.normpath(source).lower()}::{basename}"
+        
+        # If base_name is empty, try deriving from path
+        if not basename:
+            source = task_data.get("source") or task_data.get("source_path") or task_data.get("path", "")
+            basename = os.path.basename(source)
+        
+        # Strip extension and lowercase for universal matching
+        norm_base, _ = os.path.splitext(str(basename).lower())
+        
+        # Strip WatchFolder timestamp suffix: e.g., _100422 (6-digit HHMMSS appended for dedup)
+        norm_base = re.sub(r'_\d{6}$', '', norm_base)
+        
+        return f"file::{norm_base}"
 
     def check_dongle_status(self):
         """Asynchronously check lock status to prevent stuttering."""
@@ -6699,6 +6862,13 @@ class ModernTranscoderUI(QMainWindow):
         source_path = os.path.normpath(raw_source).lower() if raw_source else ""
         if not task_base: return
 
+        # [v27.10.0] FILTER CLEARED TASKS - prevent stale cluster tasks from reviving
+        task_id = self.get_task_identifier(task_data)
+        if hasattr(self, 'cleared_tasks') and task_id in self.cleared_tasks:
+            # Ghost task prevention: It was manually cleared, ignore it completely.
+            return
+
+
         # [v27.7.2] Strict Dismissal Check for Cluster Sync
         if source_path:
             norm_s = source_path
@@ -6748,6 +6918,18 @@ class ModernTranscoderUI(QMainWindow):
         if existing_widget:
             # UPDATE EXISTING
             wd = getattr(existing_widget, 'task_data', {})
+            
+            # [FIX] If the widget is already marked as done locally, do NOT let a stale
+            # "Pending" or "Assigned" cluster status overwrite it back. The cluster JSON
+            # may not have updated yet. Only update if cluster reports Done/Failed.
+            local_state = getattr(existing_widget, 'state', '')
+            local_prog = 0
+            if hasattr(existing_widget, 'progress'):
+                local_prog = existing_widget.progress.value()
+            
+            if (local_state == 'done' or local_prog >= 100) and status_check in ["Pending", "Assigned", "Processing", "Transcoding"]:
+                return  # Widget already done or finished — ignore stale Pending/Processing broadcast
+            
             wd.update(task_data)
             
             # Update Node Display
@@ -6803,7 +6985,11 @@ class ModernTranscoderUI(QMainWindow):
                       existing_widget.set_failed(err)
             else:
                  if hasattr(existing_widget, 'lbl_status'):
-                     existing_widget.lbl_status.setText(status_check)
+                     # [FIX] Do not let a delayed "Pending" or "Assigned" cluster status overwrite an active local "running" state label
+                     if getattr(existing_widget, 'state', '') == 'running' and status_check in ["Pending", "Assigned"]:
+                         pass # Keep the "QC中" or "Processing" label
+                     else:
+                         existing_widget.lbl_status.setText(status_check)
 
             # Progress Bar (Rounding Fix)
             prog = task_data.get("progress")
@@ -6812,12 +6998,16 @@ class ModernTranscoderUI(QMainWindow):
                 existing_widget.progress.setValue(p_val)
                 
                 # [v27.10.14] Force Status Update for 100% Stuck
-                # If progress is 100% but backend still says "Transcoding", override it.
+                # If progress is 100% but status is still Pending/Assigned/Transcoding, force Done.
                 if p_val >= 100:
-                     if status_check.startswith("Transcoding"):
-                         if hasattr(existing_widget, 'lbl_status'):
-                             existing_widget.lbl_status.setText("Finalizing...")
-                             existing_widget.lbl_status.setStyleSheet("color: #81d4fa; font-weight: bold;")
+                    if status_check in ["Pending", "Assigned", "Processing"] or status_check.startswith("Transcoding"):
+                        out_path = task_data.get("output_path") or wd.get("output_path")
+                        perf = task_data.get("perf") or "Done"
+                        if hasattr(existing_widget, 'set_done'):
+                            existing_widget.set_done(out_path, self.player, perf)
+                        elif hasattr(existing_widget, 'lbl_status'):
+                            existing_widget.lbl_status.setText("完成")
+                            existing_widget.lbl_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
 
             # [FIX] Execution Trigger: If assigned to ME and Pending, start it!
             if assigned_to == self.cluster_mgr.node_id and (status_check == "Pending" or status_check == "Assigned"):
@@ -6861,7 +7051,10 @@ class ModernTranscoderUI(QMainWindow):
                 "cluster_filename": task_data.get("cluster_filename"),
                 "claimed_by": claimed_by,
                 "assigned_to": assigned_to,
-                "status": status_check
+                "status": status_check,
+                "is_qc_mode": task_data.get("is_qc_mode"),
+                "qc_mode": task_data.get("qc_mode"),
+                "action": task_data.get("action")
             },
             skip_queue=not is_for_me
         )

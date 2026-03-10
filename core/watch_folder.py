@@ -23,6 +23,7 @@ class WatchFolderEngine(QThread):
         self.processed_files = self.load_history() # Now a dict {path: mtime}
         self._last_seen_mtimes = {}  # mtime from last scan
         self._seen_this_session = set()  # [v27.10.52] Files seen at least once this session
+        self._sniff_cache = {} # [v27.10.89] Cache for extension-less files: {filepath: is_valid_media}
         self.is_running = False
         self._snapshot_requested = False # Flag for async request
 
@@ -40,11 +41,37 @@ class WatchFolderEngine(QThread):
         self._snapshot_requested = True
 
     def force_scan(self):
-        """[v27.10.78] Force an immediate, fresh scan of all folders. Useful when a folder is freshly toggled 'On'."""
+        """[v27.10.78] Force an immediate, fresh scan of all folders."""
         self._last_seen_mtimes.clear()
-        # Do not clear the persistent history or we'll process old files again,
-        # but clear the short-term session cache so it looks at the folders again.
         self._seen_this_session.clear()
+
+    def _get_cleared_basenames(self):
+        """[v27.11.0] Load cleared task basenames (no extension, no timestamp) from cleared_tasks.json.
+        Returns a set of lowercase, extension-stripped, timestamp-stripped filenames.
+        E.g.: {'真相對話錄第4集##phd', '星空下的仁醫#9'}
+        """
+        import re
+        try:
+            from core.settings import get_app_path
+            cleared_path = get_app_path("cleared_tasks.json")
+            if not os.path.exists(cleared_path):
+                return set()
+            with open(cleared_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            result = set()
+            for item in raw:
+                # New format: 'file::basename'
+                if item.startswith("file::"):
+                    result.add(item[6:].lower())
+                elif "::" in item:
+                    # Old format: path::basename.ext
+                    parts = item.split("::", 1)
+                    base_no_ext = os.path.splitext(parts[1].lower())[0]
+                    base_no_ext = re.sub(r'_\d{6}$', '', base_no_ext)
+                    result.add(base_no_ext)
+            return result
+        except:
+            return set()
 
     def load_history(self):
         if os.path.exists(self.processed_db_path):
@@ -171,8 +198,55 @@ class WatchFolderEngine(QThread):
 
                     # Extension filter
                     ext = os.path.splitext(filename)[1].lower()
-                    if ext not in [".mxf", ".mp4", ".mov", ".mkv", ".ts", ".mpg", ".avi", ".wmv"]:
-                        continue
+                    allowed_exts = [".mxf", ".mp4", ".mov", ".mkv", ".ts", ".mpg", ".avi", ".wmv"]
+                    
+                    # [v27.10.89] FFprobe Fallback for Extension-less files
+                    if ext not in allowed_exts:
+                        # If no extension or unknown, try a quick ffprobe sniff if file > 1MB
+                        # to avoid probing tiny text logs
+                        if file_path.startswith(".") or filename.startswith("~$"):
+                            continue
+                            
+                        # Use cache to prevent infinite ffprobe loop on valid media or confirmed non-media
+                        if file_path in self._sniff_cache:
+                            if not self._sniff_cache[file_path]:
+                                continue
+                        else:
+                            is_valid_media = False
+                            sniff_successful = False # Track if probe actually completed without error
+                            try:
+                                if os.path.getsize(file_path) > 1024 * 1024:
+                                    import subprocess
+                                    try:
+                                        out = subprocess.check_output([
+                                            "ffprobe", "-v", "quiet", "-show_format", "-print_format", "json", file_path
+                                        ], timeout=2, stderr=subprocess.STDOUT)
+                                        sniff_successful = True # Command executed successfully
+                                        
+                                        probe_data = json.loads(out)
+                                        if "format" in probe_data and probe_data["format"].get("format_name"):
+                                            fmt = probe_data["format"]["format_name"].lower()
+                                            # Basic sanity check that it's a media container
+                                            if any(x in fmt for x in ["mxf", "mp4", "mov", "matroska", "mpeg", "avi"]):
+                                                is_valid_media = True
+                                                print(f"WatchFolderEngine: [Sniffed] Extension-less file {filename} is valid media ({fmt}).")
+                                    except subprocess.CalledProcessError as e:
+                                        pass # FFprobe explicitly failed (e.g. file locked or corrupted)
+                                    except subprocess.TimeoutExpired as e:
+                                        pass # Took too long
+                                    except Exception as e:
+                                        pass # JSON error or other
+                            except OSError:
+                                pass # File locked during getsize()
+                                
+                            if is_valid_media:
+                                self._sniff_cache[file_path] = True
+                            elif sniff_successful:
+                                # Only blacklist if FFprobe definitively proved it was not media
+                                self._sniff_cache[file_path] = False
+                                
+                            if not is_valid_media:
+                                continue
 
                     # Avoid temp files (hidden or starting with . or ~)
                     if filename.startswith(".") or filename.startswith("~$"):
@@ -211,7 +285,7 @@ class WatchFolderEngine(QThread):
 
                         print(f"WatchFolderEngine: [EVENT] NEW FILE Detected: {filename} (Repeat: {is_history_repeat})")
                         if self.is_file_ready(file_path):
-                            self._log(f"[新檔] {filename}")
+                            self._log(f"[\u65b0\u6a94] {filename}")
                             self._seen_this_session.add(file_path)
                             is_qc = wf.get("qc_mode", False)
                             self.file_detected.emit(file_path, wf.get("name", "WatchFolder"), is_history_repeat, is_qc)

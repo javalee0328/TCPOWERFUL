@@ -47,8 +47,17 @@ class QCBatchReporter:
         if metrics.get("mosaic_count", 0) > 0 or metrics.get("freeze_count", 0) > 0:
             status = "Warning" if status != "Fail" else "Fail"
 
-        # 2. Format Basic Info
-        v_info = f"{info.get('video_codec', '?')} | {info.get('video_resolution', '?')} | {info.get('fps', '?')}"
+        # 2. Format Basic Info + Audio
+        # User Req: Bitrate, Audio Track count, MONO/STEREO
+        v_info_parts = [
+            info.get('video_codec', '?'),
+            info.get('video_resolution', '?'),
+            info.get('fps', '?'),
+            info.get('bitrate_mbps', '?'),
+            f"{info.get('audio_track_count', 1)} Tracks",
+            info.get('audio_mode', 'UNK')
+        ]
+        v_info = " | ".join(v_info_parts)
         
         # 3. Format Duration
         dur_sec = info.get("duration_sec", 0)
@@ -62,26 +71,45 @@ class QCBatchReporter:
         peak = metrics.get("peak_db")
         audio_str = f"{lufs} / {peak}" if lufs is not None else "-"
 
-        # 5. Summarize Anomaly Details
+        # 5. Summarize Anomaly Details (Detailed timecodes per User Req)
         remarks = []
-        if error_msgs:
+        fps_val = float(info.get("fps", 29.97))
+        
+        def format_tc(seconds):
+            if seconds is None: return "Unknown"
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            s = int(seconds % 60)
+            f = int((seconds - int(seconds)) * fps_val)
+            return f"{h:02d}:{m:02d}:{s:02d}:{f:02d}"
+            
+        for a in anomalies:
+            typ = a.get("type", "")
+            if typ == "Audio_Loudness_Info": continue
+            
+            time_val = a.get("time") or a.get("start")
+            tc_str = f"[{format_tc(time_val)}]" if time_val is not None else "[全局]"
+            
+            if typ == "Silence_Start":
+                continue # Aggregate with End
+            elif typ == "Silence_End":
+                remarks.append(f"{tc_str} 無聲(持續 {a.get('duration', 0):.1f}s)")
+            elif typ == "Freeze_End":
+                remarks.append(f"{tc_str} 停格(持續 {a.get('duration', 0):.1f}s)")
+            elif typ == "Black_Frame":
+                remarks.append(f"{tc_str} 黑畫面(持續 {a.get('duration', 0):.1f}s)")
+            elif "Violation" in typ or "Error" in typ:
+                remarks.append(f"{tc_str} {a.get('msg', typ)}")
+            else:
+                remarks.append(f"{tc_str} {typ}")
+                
+        if not remarks and status != "Pass":
             remarks.extend(error_msgs)
             
-        if metrics.get("mosaic_count", 0) > 0: remarks.append(f"馬賽克 x{metrics['mosaic_count']}")
-        if metrics.get("freeze_count", 0) > 0: remarks.append(f"停格 x{metrics['freeze_count']}")
-        if metrics.get("black_count", 0) > 0: remarks.append(f"黑畫面 x{metrics['black_count']}")
-        if metrics.get("silence_count", 0) > 0: remarks.append(f"靜音 x{metrics['silence_count']}")
-        
-        # Catch-all for other anomalies if we haven't added anything yet but status is Fail/Warning
-        if not remarks and anomalies:
-            remarks.append("包含其他異常 (Contains Other Anomalies)")
-            
-        remarks_str = ", ".join(remarks) if remarks else "正常"
+        remarks_str = "\n".join(remarks) if remarks else "正常"
 
         row = [
-            qc_data.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
             qc_data.get("file", "Unknown"),
-            status,
             v_info,
             metrics.get("mosaic_count", 0),
             metrics.get("freeze_count", 0),
@@ -95,14 +123,32 @@ class QCBatchReporter:
 
         with QCBatchReporter._lock:
             try:
+                # [FIX] Handle CSV Schema Evolution
+                # If the user runs the app and the old CSV had 10 columns, the new 8-column 
+                # layout will crash the PDF generator. We need to start fresh if there's a mismatch.
+                needs_new_file = not file_exists
+                if file_exists:
+                    try:
+                        with open(report_path, mode='r', encoding='utf-8-sig') as f:
+                            first_line = f.readline()
+                            if first_line and len(first_line.split(',')) != 8:
+                                needs_new_file = True
+                    except: pass
+                    
+                    if needs_new_file:
+                        try:
+                            # Rename the old file instead of destroying it
+                            os.rename(report_path, report_path.replace(".csv", f"_old_{int(datetime.now().timestamp())}.csv"))
+                        except:
+                            try: os.remove(report_path)
+                            except: pass
+
                 with open(report_path, mode='a', newline='', encoding='utf-8-sig') as csvfile:
                     writer = csv.writer(csvfile)
-                    if not file_exists:
+                    if needs_new_file:
                         writer.writerow([
-                            "檢測時間 (Time)", 
                             "檔案名稱 (File)", 
-                            "狀態 (Status)", 
-                            "影音資訊 (Video/FPS)", 
+                            "影音資訊 (Video/Audio Info)", 
                             "馬賽克 (Mosaic)", 
                             "停格 (Freeze)", 
                             "起始時碼 (Start TC)", 
@@ -150,6 +196,18 @@ class QCBatchReporter:
                                         fontName=font_name,
                                         fontSize=9,
                                         alignment=1) # Center alignment
+                                        
+            error_style = ParagraphStyle(name='Error_Zh',
+                                        fontName=font_name,
+                                        fontSize=9,
+                                        textColor=colors.HexColor("#e74c3c"),
+                                        alignment=1)
+            
+            header_style = ParagraphStyle(name='Header_Zh',
+                                          fontName=font_name,
+                                          fontSize=10,
+                                          textColor=colors.whitesmoke,
+                                          alignment=1)
             
             # Read CSV Data
             table_data = []
@@ -158,11 +216,19 @@ class QCBatchReporter:
                 for i, row in enumerate(reader):
                     # Validate row length to prevent tuple index out of range
                     row = [str(cell) for cell in row]
-                    while len(row) < 10:
+                    while len(row) < 8:
                         row.append("-")
-                    row = row[:10]
-                    # Wrap each cell in a Paragraph for text wrapping, except header which we might format differently but Paragraph works fine for both
-                    wrapped_row = [Paragraph(cell, cell_style) for cell in row]
+                    row = row[:8]
+                    
+                    if i == 0:
+                        wrapped_row = [Paragraph(cell, header_style) for cell in row]
+                    else:
+                        wrapped_row = []
+                        for col_idx, cell in enumerate(row):
+                            if col_idx == 7 and cell != "正常":
+                                wrapped_row.append(Paragraph(cell, error_style))
+                            else:
+                                wrapped_row.append(Paragraph(cell, cell_style))
                     table_data.append(wrapped_row)
             
             # Need at least header + 1 data row
@@ -184,7 +250,8 @@ class QCBatchReporter:
             story.append(Paragraph(f"廣播級檔案檢測總表 (QC Batch Report) - {date_str}", title_style))
             
             # ColWidths: Tune to Landscape A4 (Total width ~800 points)
-            col_widths = [110, 160, 50, 120, 50, 40, 70, 60, 70, 80]
+            # File, Video Info, Mosaic, Freeze, Start TC, Duration, Audio, Remarks
+            col_widths = [130, 240, 60, 60, 70, 60, 70, 110]
             
             t = Table(table_data, colWidths=col_widths, repeatRows=1)
             
@@ -206,27 +273,9 @@ class QCBatchReporter:
             for i, row in enumerate(table_data):
                 if i == 0: continue
                 
-                # row[2] is a Paragraph object. Use .text to get the string content
-                status_cell = row[2]
-                status = getattr(status_cell, 'text', '') if hasattr(status_cell, 'text') else str(status_cell)
-                
-                row_bg_color = None
-                if "Warning" in status:
-                    row_bg_color = colors.HexColor("#f39c12")
-                    style.add('BACKGROUND', (2, i), (2, i), row_bg_color) # Orange
-                    style.add('TEXTCOLOR', (2, i), (2, i), colors.white)
-                elif "Fail" in status:
-                    row_bg_color = colors.HexColor("#e74c3c")
-                    style.add('BACKGROUND', (2, i), (2, i), row_bg_color) # Red
-                    style.add('TEXTCOLOR', (2, i), (2, i), colors.white)
-                else: 
-                    style.add('TEXTCOLOR', (2, i), (2, i), colors.HexColor("#27ae60")) # Green
-                
                 # Zebra striping
                 if i % 2 == 0:
                     style.add('BACKGROUND', (0, i), (-1, i), colors.HexColor("#f8f9fa"))
-                    if row_bg_color:
-                        style.add('BACKGROUND', (2, i), (2, i), row_bg_color) # Preserve priority colors
 
             t.setStyle(style)
             story.append(t)

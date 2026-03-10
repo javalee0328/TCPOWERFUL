@@ -11,10 +11,10 @@ class BroadcastQC:
         self.ffprobe_cmd = ffprobe_path
         self.logger = logging.getLogger("QCAnalyzer")
         
-    def analyze(self, file_path):
+    def analyze(self, file_path, progress_callback=None):
         """
-        Runs a comprehensive broadcast QC scan on the file.
-        Returns a dictionary with basic info and a list of detected anomalies.
+        Runs comprehensive QC on a given file.
+        Returns a dict of anomalies and file info.
         """
         self.logger.info(f"Starting Broadcast QC analysis for: {file_path}")
         if not os.path.exists(file_path):
@@ -22,7 +22,8 @@ class BroadcastQC:
             return {"error": "File not found"}
 
         info = self._get_basic_info(file_path)
-        anomalies = self._detect_anomalies(file_path)
+        # Run deep anomaly detection
+        anomalies = self._detect_anomalies(file_path, duration_sec=info.get("duration_sec", 0.0), progress_callback=progress_callback)
         
         # [NEW] Metrics Summary for UI Dashboard
         metrics = {
@@ -93,13 +94,19 @@ class BroadcastQC:
             v_bitrate = int(video_stream.get("bit_rate", format_info.get("bit_rate", 0)))
             v_bitrate_mbps = f"{round(v_bitrate / 1000000)}Mb" if v_bitrate else "Unknown"
             
-            # Helper for Audio Sample Depth
+            # Helper for Audio Sample Depth & Tracks
+            audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+            audio_stream_count = len(audio_streams)
+            
             a_codec = audio_stream.get("codec_name", "Unknown").upper()
             sample_fmt = audio_stream.get("sample_fmt", "")
             if "s32" in sample_fmt: a_codec += " 32bit"
             elif "s24" in sample_fmt: a_codec += " 24bit"
             elif "s16" in sample_fmt: a_codec += " 16bit"
             elif "flt" in sample_fmt: a_codec += " 32bit Float"
+            
+            channels = int(audio_stream.get("channels", 0)) if audio_stream else 0
+            audio_mode = "MONO" if channels == 1 else "STEREO" if channels == 2 else f"{channels}CH"
             
             # Scan type mapping
             field_order = video_stream.get("field_order", "progressive")
@@ -122,6 +129,19 @@ class BroadcastQC:
             mtime = time.strftime('%Y/%m/%d', time.localtime(os.path.getmtime(file_path)))
             ctime = time.strftime('%Y/%m/%d', time.localtime(os.path.getctime(file_path)))
             
+            # Frame Rate Parsing Helper
+            fps_str = video_stream.get("r_frame_rate", "0/0")
+            try:
+                num, den = map(int, fps_str.split('/'))
+                fps_val = round(num / den, 3) if den != 0 else 0.0
+            except:
+                fps_val = 0.0
+                
+            # Broadcast Safe Ranges & Spaces
+            color_range = video_stream.get("color_range", "tv") # tv (16-235) or pc (0-255)
+            color_space = video_stream.get("color_space", "bt709")
+            color_primaries = video_stream.get("color_primaries", "bt709")
+            
             # Pixel format cleanup
             pix_fmt = video_stream.get("pix_fmt", "yuv420p").upper()
             if "422" in pix_fmt: pix_fmt = "YUVP_422"
@@ -139,6 +159,8 @@ class BroadcastQC:
                 "dropframe": is_dropframe,
                 "audio_codec": a_codec,
                 "audio_channels": str(audio_stream.get("channels", "Unknown")),
+                "audio_track_count": audio_stream_count,
+                "audio_mode": audio_mode,
                 "mod_time": mtime,
                 "scan_type": scan_type,
                 "aspect_ratio": video_stream.get("display_aspect_ratio", "16:9"),
@@ -146,9 +168,12 @@ class BroadcastQC:
                 "fps": str(fps_val),
                 "afd": "UNKNOW", # Hard fallback matching user screenshot
                 "size_mb": f"{round(file_size_bytes / (1024*1024))}M",
-                "color_primaries": video_stream.get("color_primaries", "ITU R709").upper().replace("BT", "ITU R"),
+                "color_primaries": color_primaries.upper().replace("BT", "ITU R"),
                 "color_transfer": video_stream.get("color_transfer", "BT.709").upper(),
                 "audio_sample_rate": f"{round(int(audio_stream.get('sample_rate', 0)) / 1000, 1)}kHz",
+                # Metrics for Broadcast Standard Validation
+                "raw_color_range": color_range,
+                "raw_color_space": color_space,
                 # Needed for backwards compatibility
                 "size_bytes": file_size_bytes,
                 "duration_sec": round(duration_sec, 3)
@@ -157,7 +182,7 @@ class BroadcastQC:
             self.logger.error(f"Error getting basic info: {e}")
             return {"error": str(e)}
 
-    def _detect_anomalies(self, file_path):
+    def _detect_anomalies(self, file_path, duration_sec=0.0, progress_callback=None):
         """
         Runs a full-decode pass using ffmpeg to detect:
         1. Silence (-50dB, >1s)
@@ -199,11 +224,29 @@ class BroadcastQC:
             audio_peak = -float('inf')
             lufs_i = -float('inf')
             last_freeze_duration = 0.0
+            last_silence_start = None
             
             for line in iter(process.stderr.readline, ''):
                 line = line.strip()
                 if not line:
                     continue
+                
+                # Progress Reporting
+                if progress_callback and duration_sec > 0 and "time=" in line:
+                    try:
+                        # Extract time=HH:MM:SS.ms string
+                        time_match = re.search(r"time=([\d:.]+)", line)
+                        if time_match:
+                            time_str = time_match.group(1)
+                            h, m, s = time_str.split(':')
+                            curr_time_sec = int(h) * 3600 + int(m) * 60 + float(s)
+                            
+                            percent = (curr_time_sec / duration_sec) * 100
+                            # Map 0-100% video decoding to 10%-70% UI progress bar
+                            scaled_percent = int(10 + (percent * 0.6)) 
+                            progress_callback(scaled_percent, f"分析中 (Analyzing {int(percent)}%)...")
+                    except Exception:
+                        pass
                 
                 # Decoding error catch
                 if "Error while decoding" in line or "corrupt" in line.lower() or "missing picture" in line.lower():
@@ -215,11 +258,20 @@ class BroadcastQC:
                 if "silence_start" in line:
                     match = re.search(r"silence_start:\s+([\d\.]+)", line)
                     if match:
-                        anomalies.append({"type": "Silence_Start", "time": float(match.group(1))})
+                        last_silence_start = float(match.group(1))
                 elif "silence_end" in line:
                     match = re.search(r"silence_end:\s+([\d\.]+)\s+\|\s+silence_duration:\s+([\d\.]+)", line)
                     if match:
-                        anomalies.append({"type": "Silence_End", "time": float(match.group(1)), "duration": float(match.group(2))})
+                        end_t = float(match.group(1))
+                        dur = float(match.group(2))
+                        # [FIX] Ignore silence that occurs at the very end of the file (within 0.5s of EOF)
+                        if duration_sec > 0 and end_t >= duration_sec - 0.5:
+                            last_silence_start = None # Discard trailing silence
+                        else:
+                            if last_silence_start is not None:
+                                anomalies.append({"type": "Silence_Start", "time": last_silence_start})
+                                last_silence_start = None
+                            anomalies.append({"type": "Silence_End", "time": end_t, "duration": dur})
                         
                 # Freeze detect parsing
                 # [freezedetect] lavfi.freezedetect.freeze_start: 2.5
@@ -289,6 +341,58 @@ class BroadcastQC:
         except Exception as e:
             self.logger.error(f"Error during anomaly detection: {e}")
             anomalies.append({"type": "Exception", "msg": str(e)})
+
+        # [NEW] Broadcast Video Standards Metadata Checks (NTSC/ITU-R)
+        try:
+            # We can retrieve the basic info we just parsed by calling _get_basic_info again or passing it down. 
+            # For robustness, we will do a fast ffprobe extraction here tailored for these specific broadcast flags 
+            # since _detect_anomalies doesn't receive the `info` dict natively.
+            out = subprocess.check_output([
+                self.ffprobe_cmd, "-v", "quiet", "-print_format", "json", "-show_streams", "-select_streams", "v:0", file_path
+            ], encoding='utf-8', errors='replace', startupinfo=startupinfo)
+            data = json.loads(out)
+            if data.get("streams"):
+                v_stream = data["streams"][0]
+                width = int(v_stream.get("width", 0))
+                color_range = v_stream.get("color_range", "unknown")
+                color_space = v_stream.get("color_space", "unknown")
+                fps_str = v_stream.get("r_frame_rate", "0/0")
+                
+                try:
+                    num, den = map(int, fps_str.split('/'))
+                    fps_val = round(num / den, 3) if den != 0 else 0.0
+                except:
+                    fps_val = 0.0
+
+                # 1. Broadcast Safe Gamut (YUV 16-235)
+                # 'pc' or 'jpeg' implies 0-255 Full Range. Broadcast standard is 'tv' or 'mpeg' (16-235).
+                if color_range == "pc" or color_range == "jpeg":
+                    anomalies.append({
+                        "type": "NTSC_Video_Standard_Violation", 
+                        "msg": f"Color Range is Full (0-255), violating Broadcast TV Legal Gamut (16-235)."
+                    })
+                
+                # 2. HD Color Space Matching (ITU-R BT.709 vs BT.601)
+                # 1920x1080 Must be BT.709. If it's BT.601 (smpte170m, etc), colors will shift on TV.
+                if width >= 1280:
+                    if color_space in ["smpte170m", "smpte240m", "bt470bg", "bt601"]:
+                        anomalies.append({
+                            "type": "NTSC_Video_Standard_Violation", 
+                            "msg": f"HD Video ({width}p) using SD Color Space ({color_space}). Expected BT.709."
+                        })
+                        
+                # 3. NTSC/PAL Standard Framerate Checks
+                # Standard broadcast frame rates: 23.976, 24, 25, 29.97, 30, 50, 59.94, 60
+                valid_framerates = [23.976, 24.0, 25.0, 29.970, 30.0, 50.0, 59.940, 60.0]
+                # Allow a small floating point margin (0.01)
+                if fps_val > 0.0 and not any(abs(fps_val - v) < 0.01 for v in valid_framerates):
+                    anomalies.append({
+                        "type": "NTSC_Video_Standard_Violation", 
+                        "msg": f"Non-standard broadcast framerate detected: {fps_val} fps."
+                    })
+
+        except Exception as e:
+            self.logger.error(f"Error checking NTSC video standards: {e}")
 
         return anomalies
 

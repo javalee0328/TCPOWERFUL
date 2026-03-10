@@ -60,7 +60,10 @@ class ClusterWorker(QObject):
                 time.sleep(0.1)
                 
         print("ClusterWorker: Thread Finished.")
-        self.finished.emit()
+        try:
+            self.finished.emit()
+        except RuntimeError:
+            pass  # Object was deleted before thread had a chance to emit
 
     def stop(self):
         self.running = False
