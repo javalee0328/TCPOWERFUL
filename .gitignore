@@ -20,6 +20,7 @@
 !core/**
 !ui/**
 !assets/**
+!ALLPYCODE/**
 
 # Un-ignore specific file types
 !*.spec
