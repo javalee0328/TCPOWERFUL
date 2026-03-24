@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+sqlalchemy
+python-multipart
+pillow
+watchdog
+exifread
+opencv-python-headless
+axios

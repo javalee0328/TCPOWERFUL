@@ -21,6 +21,8 @@
 !ui/**
 !assets/**
 !ALLPYCODE/**
+!MediaBackupApp/**
+!MediaBackupApp/
 
 # Un-ignore specific file types
 !*.spec

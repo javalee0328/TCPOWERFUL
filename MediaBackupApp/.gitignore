@@ -1,0 +1,8 @@
+# Local ignores for MediaBackupApp
+storage/
+test_*.py
+test_files/
+test_img.jpg
+*.pid
+.hub.pid
+uvicorn_err.log

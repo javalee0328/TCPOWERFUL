@@ -1,0 +1,11 @@
+{
+  "expo": {
+    "name": "專業照片備份中心",
+    "slug": "media-backup-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "extra": {
+      "apiUrl": "http://10.217.110.21:8000"
+    }
+  }
+}
