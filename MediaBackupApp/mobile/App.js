@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   StyleSheet, Text, View, TouchableOpacity, ScrollView,
-  Alert, ActivityIndicator, SafeAreaView, Platform, FlatList
+  Alert, ActivityIndicator, SafeAreaView, Platform, FlatList, Image
 } from 'react-native';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -27,7 +27,9 @@ export default function App() {
   const [progress, setProgress] = useState({ current: 0, total: 0, skipped: 0, failed: 0 });
   const [logs, setLogs] = useState([]);
   const [tab, setTab] = useState('backup');  // 'backup' | 'list'
+  const [albumMode, setAlbumMode] = useState('local'); // 'local' | 'cloud'
   const [backedUpFiles, setBackedUpFiles] = useState([]);
+  const [uploadedSize, setUploadedSize] = useState(0); 
   const [failedFiles, setFailedFiles] = useState([]);  // filenames that failed
   const isCancelled = useRef(false);
   const failedAssetsRef = useRef([]);  // full asset objects that failed
@@ -72,6 +74,7 @@ export default function App() {
     setStatusText('備份進行中...');
     const uploadedIds = [];
     let skippedCount = 0, failedCount = 0;
+    let totalSize = 0;
 
     try {
       // Fetch all media
@@ -149,6 +152,7 @@ export default function App() {
             if (ok && body.status !== 'error') {
               addLog(`✅ 備份: ${fileName}`);
               uploadedIds.push(asset.id);
+              totalSize += (info.size || 0);
             } else {
               addLog(`❌ 失敗 (${uploadResult.status}): ${fileName} → ${body.message || uploadResult.body?.substring(0, 60) || '未知'}`);
               failedCount++;
@@ -183,11 +187,14 @@ export default function App() {
         }
 
         if (uploadedIds.length > 0) {
-          Alert.alert('備份成功', `已備份 ${uploadedIds.length} 個\n跳過 ${skippedCount} 個（已有）\n\n是否要釋放手機空間？`, [
+          const sizeMB = (totalSize / 1024 / 1024).toFixed(1);
+          const sizeStr = sizeMB > 1024 ? `${(sizeMB/1024).toFixed(2)} GB` : `${sizeMB} MB`;
+          
+          Alert.alert('備份成功', `已備份 ${uploadedIds.length} 個\n跳過 ${skippedCount} 個（已有）\n\n是否要釋放手機空間？\n(可騰出約 ${sizeStr} 空間)`, [
             { text: '不要', style: 'cancel' },
             { text: '釋放空間', style: 'destructive', onPress: async () => {
               await MediaLibrary.deleteAssetsAsync(uploadedIds);
-              addLog(`🗑️ 已刪除 ${uploadedIds.length} 個已備份檔案`);
+              addLog(`🗑️ 已刪除 ${uploadedIds.length} 個檔案，釋放 ${sizeStr} 空間`);
             }}
           ]);
         } else if (failedCount > 0) {
@@ -341,25 +348,58 @@ export default function App() {
         </ScrollView>
       ) : (
         <View style={{ flex: 1 }}>
-          <Text style={s.listHeader}>共 {backedUpFiles.length} 個已備份檔案</Text>
-          <FlatList
-            data={backedUpFiles}
-            keyExtractor={(item, i) => i.toString()}
-            renderItem={({ item }) => (
-              <View style={s.listItem}>
-                <Text style={s.listIcon}>{item.endsWith('.mp4') || item.endsWith('.mov') ? '🎬' : '🖼️'}</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.listName}>{item.split('/').pop()}</Text>
-                  <Text style={s.listPath}>{item}</Text>
+          <View style={s.subTabs}>
+             <TouchableOpacity style={[s.subTab, albumMode==='local' && s.subTabActive]} onPress={()=>setAlbumMode('local')}>
+               <Text style={[s.subTabTxt, albumMode==='local' && s.subTabActiveTxt]}>📱 手機端</Text>
+             </TouchableOpacity>
+             <TouchableOpacity style={[s.subTab, albumMode==='cloud' && s.subTabActive]} onPress={()=>setAlbumMode('cloud')}>
+               <Text style={[s.subTabTxt, albumMode==='cloud' && s.subTabActiveTxt]}>☁️ 電腦端</Text>
+             </TouchableOpacity>
+          </View>
+
+          {albumMode === 'local' ? (
+            <FlatList
+              data={backedUpFiles}
+              keyExtractor={(item, i) => i.toString()}
+              ListHeaderComponent={<Text style={s.listHeader}>目前僅顯示備份記錄，共 {backedUpFiles.length} 項</Text>}
+              renderItem={({ item }) => (
+                <View style={s.listItem}>
+                  <Text style={s.listIcon}>{item.endsWith('.mp4') || item.endsWith('.mov') ? '🎬' : '🖼️'}</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.listName}>{item.split('/').pop()}</Text>
+                    <Text style={s.listPath}>{item}</Text>
+                  </View>
                 </View>
-              </View>
-            )}
-            ListEmptyComponent={
-              <Text style={{ color: '#64748b', textAlign: 'center', marginTop: 60 }}>
-                尚無備份記錄{'\n'}請先執行備份
-              </Text>
-            }
-          />
+              )}
+            />
+          ) : (
+            <FlatList
+              data={backedUpFiles}
+              numColumns={3}
+              keyExtractor={(item) => item}
+              renderItem={({ item }) => (
+                <TouchableOpacity style={s.cloudThumb} onPress={() => {
+                   Alert.alert('照片操作', `檔名: ${item.split('/').pop()}\n要將此專案下載回手機嗎？`, [
+                     {text: '取消', style:'cancel'},
+                     {text: '⬇️ 下載回遷', onPress: async () => {
+                        try {
+                          addLog(`📥 開始下載: ${item}`);
+                          const downloadPath = FileSystem.documentDirectory + item.split('/').pop();
+                          const result = await FileSystem.downloadAsync(`${API_URL}/view/${encodeURIComponent(item)}`, downloadPath);
+                          await MediaLibrary.saveToLibraryAsync(result.uri);
+                          Alert.alert('下載成功', '已存入相簿');
+                          addLog(`✅ 已回遷: ${item}`);
+                        } catch(e) { Alert.alert('下載失敗', e.message); }
+                     }}
+                   ]);
+                }}>
+                  <Image source={{ uri: `${API_URL}/thumbnail/${encodeURIComponent(item)}` }} style={s.cloudImg} />
+                  { (item.endsWith('.mp4') || item.endsWith('.mov')) && <View style={s.cloudBadge}><Text style={{fontSize:10}}>▶</Text></View> }
+                </TouchableOpacity>
+              )}
+              ListEmptyComponent={<Text style={{ color: '#64748b', textAlign: 'center', marginTop: 60 }}>☁️ 電腦端尚無照片</Text>}
+            />
+          )}
         </View>
       )}
     </SafeAreaView>
@@ -395,4 +435,14 @@ const s = StyleSheet.create({
   listIcon: { fontSize: 24, marginRight: 12 },
   listName: { fontSize: 13, fontWeight: '600', color: '#1e293b' },
   listPath: { fontSize: 11, color: '#94a3b8', marginTop: 2 },
+  
+  subTabs: { flexDirection: 'row', padding: 10, backgroundColor: '#f1f5f9' },
+  subTab: { flex: 1, padding: 8, alignItems: 'center', borderRadius: 8 },
+  subTabActive: { backgroundColor: 'white', elevation: 2, shadowOpacity:0.1 },
+  subTabTxt: { fontSize: 13, color: '#64748b', fontWeight: '600' },
+  subTabActiveTxt: { color: '#3b82f6' },
+  
+  cloudThumb: { flex: 1/3, aspectRatio: 1, margin: 1, backgroundColor: '#eee' },
+  cloudImg: { width: '100%', height: 120, objectFit: 'cover' },
+  cloudBadge: { position: 'absolute', bottom: 4, right: 4, backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 4, padding: 2 },
 });
